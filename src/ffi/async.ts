@@ -243,14 +243,11 @@ export function noteUnmatchedDeviceCallback(slot: string, deviceId: number): voi
   unmatchedDeviceCallbacks++;
   if (unmatchedDeviceCallbacks !== 1) return;
   console.error(
-    `wgpu-bun: a ${slot} callback named device id ${deviceId}, which is not live.
-` +
-      `  After device.destroy() that is ordinary. Before it, it means the callback's arguments were
-` +
-      `  decoded under the wrong ABI rule — the id is being read out of a neighbouring register — and
-` +
-      `  the error it carried has been lost. Check the seam: ${JSON.stringify(seamStatus().mode)} bound, ` +
-      `${boundMode() ?? "(not bound)"}.`,
+    `wgpu-bun: a ${slot} callback named device id ${deviceId}, which is not live.\n` +
+      `  After device.destroy() that is ordinary. Before it, it means the callback's arguments were\n` +
+      `  decoded under the wrong ABI rule — the id is being read out of a neighbouring register — and\n` +
+      `  the error it carried has been lost.\n` +
+      `  seam: resolved=${seamStatus().mode} bound=${boundMode() ?? "(not bound)"}`,
   );
 }
 

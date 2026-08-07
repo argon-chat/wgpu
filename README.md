@@ -3,7 +3,7 @@
 A [Bun](https://bun.sh) FFI binding to [wgpu-native](https://github.com/gfx-rs/wgpu-native),
 API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm package.
 
-> ## Status: feature-complete for what it claims; measured on one platform of four.
+> ## Status: green on every supported platform, against three graphics APIs.
 >
 > **Implemented.** `create()` returns a real `GPU`. Adapter, device, buffers, textures, samplers,
 > bind groups, pipelines, encoders, queues; WGSL compilation, compute dispatch, render to texture,
@@ -15,18 +15,26 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 > blocklisted by name, and the five out-of-scope subsystems are listed under [Scope](#scope) —
 > surfaces, render bundles, indirect draw, occlusion queries, external textures.
 >
-> **Proven by execution: `win32-x64` only**, against wgpu-native `v29.0.1.1` on a discrete NVIDIA
-> adapter over D3D12 and on the WARP software adapter in CI — the full suite, and both of the two
-> calling paths described under [The ABI seam](#the-abi-seam).
+> **Proven by execution on all four supported platforms**, against wgpu-native `v29.0.1.1`, each
+> reaching a real device rather than skipping:
 >
-> **`linux-x64`, `linux-arm64` and `darwin-arm64` compile and typecheck; the binding does not yet
-> pass there.** The first CI matrix run found a real defect on all three at once — a by-value
-> `WGPUStringView` callback parameter decoded under the Win64 rule — and it is fixed but not yet
-> re-measured. [What is proven and what is argued](#what-is-proven-and-what-is-argued) says exactly
-> which claims rest on execution and which on a specification.
+> | platform | adapter | API |
+> |---|---|---|
+> | `win32-x64` | Microsoft Basic Render Driver (WARP), and a discrete NVIDIA adapter locally | D3D12 |
+> | `linux-x64` | llvmpipe (Mesa 25.2.8, 256-bit) | Vulkan |
+> | `linux-arm64` | llvmpipe (Mesa 25.2.8, 128-bit) | Vulkan |
+> | `darwin-arm64` | Apple Paravirtual device | Metal |
 >
-> **Not published, and not ready to be.** `private: true` is still set. See
-> [Remaining gaps](#remaining-gaps).
+> Three graphics backends, two processor architectures, two calling conventions. The CI legs that
+> cannot reach a device are configured to **fail rather than skip**, so a green matrix means the
+> suite ran, not that it was excused.
+>
+> **Not yet published.** `private: true` is still set, and the prebuilt shim artefacts are not
+> released. See [Remaining gaps](#remaining-gaps).
+>
+> [What is proven and what is argued](#what-is-proven-and-what-is-argued) still separates every
+> claim resting on execution from every claim resting on a specification — the distinction that
+> caught a real defect on three platforms at once, and is worth keeping now that they are green.
 
 ---
 
@@ -44,8 +52,8 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 | `getCompilationInfo()`, synthesised from the creation-time validation error | ✅ |
 | Explicit, documented backend selection (D3D12 / Vulkan / Metal) | ✅ |
 | The by-value ABI holes — both directions — closed by a compiled shim | ✅ |
+| A green test run on every supported platform, each on a real device | ✅ |
 | Prebuilt shim artefacts published and pinned by sha256 | ⏳ not yet released |
-| A green test run on anything other than `win32-x64` | ⏳ not yet |
 | Surfaces, render bundles, indirect draw, occlusion queries, external textures | ❌ out of scope |
 
 ## Why this exists
@@ -401,20 +409,23 @@ has run. Both can be true; only one is evidence. Everything below is one or the 
 | The version-skew guard | a shim reporting the wrong flat-ABI version is refused at load, as `AbiUnsupportedError` |
 | The struct-layout oracle on `win32-x64` | all 115 aggregates, `sizeof`/`offsetof` from a real C compiler on the pinned headers |
 | **The shim compiles on all four platforms** | CI built and uploaded it on `win32-x64`, `linux-x64`, `linux-arm64` and `darwin-arm64` |
-| **The trampoline fix, on `linux-x64`** | CI reached a real device — `llvmpipe / Mesa 25.2.8`, `seam: resolved=shim bound=shim`, 276 pass. The SysV path is no longer a claim |
-| **That the device-scoped callbacks were broken too** | the same run found `uncapturedError` / `deviceLost` failing on `linux-x64` and `linux-arm64` — a second site, same defect, since fixed |
+| **The whole suite on every supported platform** | each leg reached a real device and ran: WARP/D3D12, llvmpipe/Vulkan on both architectures, Apple Paravirtual/Metal. All four bound the shim |
+| **Both by-value ABI holes, on the platforms each one afflicts** | the 40-byte argument hole on `linux-x64` (SysV), the 16-byte `WGPUStringView` callback hole on all three non-Windows platforms. Each was found by a red CI leg and closed by a green one |
+| **AArch64 register assignment for both aggregate sizes** | `linux-arm64` and `darwin-arm64` both green through the shim — the AAPCS rules are now observed behaviour, not a reading of the specification |
+| **The layout oracle outside Windows** | it compiles the pinned headers with a real C compiler on every leg; the header-shadowing shim is Windows-only precisely because the other platforms have real system headers |
+| **Struct layouts identical across all four platforms** | `check:layouts` green on every leg against that leg's own fetched headers |
 | The structural guard against a third site | mutation-tested: a stray `JSCallback`, an inline arg list, and an unbound header callback each make it fail |
 | Two of the forty abort-on-call symbols, by hand | `wgpuBufferWriteMappedRange` aborts; `wgpuBufferGetMappedRange` works |
 
 ### Argued, not executed
 
+Short, and deliberately kept rather than deleted — a section that empties itself is a section nobody
+will repopulate when the next claim outruns its evidence.
+
 | | Basis | What would settle it |
 |---|---|---|
-| **That the device-callback fix works** on the three platforms it was written for | identical mechanism to the five callbacks already proven on `linux-x64`, and proven on Win64 on both seam paths | one CI matrix run; this is now the single most load-bearing unexecuted claim here |
-| AArch64 register assignment for both aggregate sizes | AAPCS: >16 B indirect, ≤16 B in up to two GPRs; `linux-arm64` behaved identically to `linux-x64` throughout, which is what the rule predicts | an `arm64` run that completes |
-| That a hosted macOS runner completes a device request | the `darwin-arm64` leg got as far as asking, so the stack initialises | a `darwin-arm64` run |
-| Struct layouts being identical on all four platforms | both headers use only fixed-width scalars, enums, pointers and `size_t` — no `long`, no bitfields, no arrays, so LLP64 and LP64 cannot diverge | the oracle running on the other three |
-| Whether the layout oracle's header-shadowing trick survives outside Windows | it has only ever run there | the same |
+| Behaviour on a **discrete** GPU on anything but Windows | every non-Windows leg ran on a software or paravirtualised adapter. Nothing here is adapter-specific, but "nothing here is" is an argument, not a measurement | a run on real hardware, which hosted runners do not offer |
+| `win32-arm64` | the AAPCS rules it would follow are now executed on two other AArch64 platforms, but Windows-on-ARM combines them with the Win64 aggregate rule, and that pairing has never run | adding the RID and a runner |
 | Thirty-eight of the forty abort-on-call symbols | upstream's Rust source at the pinned tag | the subprocess-per-symbol sweep (`bun run derive:aborts:probe`) |
 
 ### Not being wrong a third time
@@ -459,25 +470,19 @@ All three were mutation-tested — each was made to fail deliberately before bei
 
 Ordered by what blocks a release.
 
-1. **Three of the four platforms have not yet passed a full run.** Two matrix runs so far. The
-   first found the by-value callback defect on all three non-Windows platforms; the second
-   confirmed the fix — `linux-x64` reached a real `llvmpipe` device over the shim path — and found
-   the same defect at a second site, the device-scoped `uncapturedError` and `deviceLost`
-   callbacks. That is fixed and not yet re-measured, because it cannot be executed from a Windows
-   machine. Nothing should be published before a green matrix.
-2. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
+1. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
    `bun run shim:fetch` refuses to install, by design. Until then the acquisition paths are
    `bun run shim:build` (needs cargo) or the platform npm package, which does not exist either.
-3. **`private: true` is still set**, and `bun run release:check` names it as a blocker. It is an
+2. **`private: true` is still set**, and `bun run release:check` names it as a blocker. It is an
    interlock, not an oversight: `npm publish` refuses a private package, so nothing can reach the
    registry by accident. Clearing it is a deliberate release decision that belongs in the release
    commit next to the version bump.
-4. **The version is `0.0.0`.** It stays `0.0.x` while the status flag says the binding is
+3. **The version is `0.0.0`.** It stays `0.0.x` while the status flag says the binding is
    unfinished — the test suite binds those two together so the claim and the code cannot drift.
-5. **The behaviour-derived blocklist sweep has not been run** against the shipped binary. The list is
+4. **The behaviour-derived blocklist sweep has not been run** against the shipped binary. The list is
    source-accurate at the pinned tag; the tag and the shipped build can differ by a commit, which is
    the reason the second derivation exists.
-6. **No WebGPU CTS run.** A worthy goal, and not a claim that will be made before it is measured.
+5. **No WebGPU CTS run.** A worthy goal, and not a claim that will be made before it is measured.
 
 ## Install
 
