@@ -52,6 +52,14 @@ on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      bootstrap:
+        description: >-
+          FIRST PUBLISH ONLY. Authenticate with the NPM_TOKEN secret instead of OIDC, because a
+          trusted publisher cannot be configured for a package that does not exist yet. Leave this
+          off for every release after the first.
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -207,21 +215,47 @@ jobs:
         # a committed block would mean every `bun install` tries to resolve four 404s.
         run: bun run release:wire
 
+      - name: Announce the authentication mode
+        # Stated out loud because the two modes differ in what the published artefact CARRIES, not
+        # just in how it authenticates: a bootstrap publish has no provenance attestation and so no
+        # badge on npmjs.com. Someone reading the release later should be able to see why.
+        run: |
+          if [ "${{ inputs.bootstrap }}" = "true" ]; then
+            echo "::warning title=wgpu-bun::BOOTSTRAP publish — authenticating with NPM_TOKEN."
+            echo "This release will NOT carry a provenance attestation. Configure trusted"
+            echo "publishers for every package afterwards, revoke the token, and never use this"
+            echo "mode again."
+            test -n "${NODE_AUTH_TOKEN:-}" || { echo "::error::bootstrap requested but the NPM_TOKEN secret is empty"; exit 1; }
+          else
+            echo "Trusted publishing (OIDC). Provenance is attached by npm automatically."
+          fi
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
       - name: Publish platform packages first
         # Order matters. The root package's `optionalDependencies` point at these exact versions, so
         # publishing the root first leaves a window in which `bun add wgpu-bun` resolves a binding
         # with no library behind it.
         #
-        # No `--provenance`: trusted publishing attaches the attestation itself.
+        # No `--provenance`: under OIDC npm attaches the attestation itself, and under bootstrap
+        # there is nothing to attach — passing the flag would fail rather than downgrade.
+        #
+        # `NODE_AUTH_TOKEN` is set only in bootstrap mode. When it is empty the npm CLI falls
+        # through to the OIDC exchange, which is the steady state; there is no way to accidentally
+        # use a token that was not deliberately requested.
         run: |
           set -euo pipefail
           for dir in dist/npm/*/; do
             echo "publishing $dir"
             (cd "$dir" && npm publish --access public)
           done
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.bootstrap && secrets.NPM_TOKEN || '' }}
 
       - name: Publish the root package
         run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ inputs.bootstrap && secrets.NPM_TOKEN || '' }}
 
       - name: Summary
         run: |
