@@ -79,8 +79,24 @@ const INCLUDE_DIR = locateIncludeDir();
 
 /* ── 2. The C shim Bun does not provide ────────────────────────────────────────────────────────── */
 
+/**
+ * Windows only, and that restriction is load-bearing.
+ *
+ * The shim exists because Bun stages no system headers on Windows. Everywhere else the platform's
+ * real `stdint.h` is present and correct, and putting this one ahead of it does not "also work" — it
+ * SHADOWS the real header with definitions that disagree. `intptr_t` here is `long long`; under LP64
+ * (Linux, macOS) the system spells it `long`. Same width, different type, so the compiler rejects it
+ * outright: `incompatible redefinition of 'intptr_t'`.
+ *
+ * That is the good outcome. The bad one would have been a shim that redefined a type *compatibly*
+ * but differently sized — the probe would compile, report layouts for types the real headers never
+ * use, and the oracle would confidently confirm the wrong numbers.
+ */
+const NEEDS_SHIM = process.platform === "win32";
+
 function writeShim(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "wgpu-bun-oracle-"));
+  if (!NEEDS_SHIM) return dir; // still a home for layout-probe.c, just not on the include path
   fs.writeFileSync(
     path.join(dir, "stdint.h"),
     `#ifndef WGPU_BUN_ORACLE_STDINT_H
@@ -204,17 +220,21 @@ const shimDir = writeShim();
 const sourcePath = path.join(shimDir, "layout-probe.c");
 fs.writeFileSync(sourcePath, source);
 
+// The shim directory goes on the include path only where the shim was actually written. Adding it
+// unconditionally is what broke every non-Windows leg: an empty directory would be harmless, but a
+// populated one shadows the system headers it was never meant to replace.
+const includeDirs = NEEDS_SHIM ? [INCLUDE_DIR, shimDir] : [INCLUDE_DIR];
+
 const { symbols } = cc({
   source: sourcePath,
-  include: [INCLUDE_DIR, shimDir],
+  include: includeDirs,
   // Bun's defaults, restated, plus our include paths. `flags` REPLACES the default string.
   flags: [
     "-std=c11",
     "-Wl,--export-all-symbols",
     "-g",
     "-O2",
-    `-I${INCLUDE_DIR}`,
-    `-I${shimDir}`,
+    ...includeDirs.map((d) => `-I${d}`),
   ],
   symbols: {
     wgpu_bun_layout_probe: { args: [FFIType.ptr], returns: FFIType.void },

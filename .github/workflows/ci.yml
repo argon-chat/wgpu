@@ -74,6 +74,13 @@ jobs:
   test:
     name: ${{ matrix.rid }}
     runs-on: ${{ matrix.runner }}
+    # A GPU call that never completes is a real possibility here — wgpu-native delivers results only
+    # on poll, so a driver that never answers looks exactly like slow work. The binding now imposes
+    # its own deadline and fails with a diagnosis, but this is the backstop for anything that stalls
+    # outside it: without it a single stuck call inherits GitHub's 6-hour default and burns a runner
+    # while reporting nothing. Chosen well above the honest worst case, so it only ever catches a
+    # genuine hang.
+    timeout-minutes: 20
     needs: static
     strategy:
       fail-fast: false
@@ -96,9 +103,7 @@ jobs:
             runner: macos-15
             # Paravirtualised Metal. Expected to work; not measured.
             allow_no_adapter: "1"
-          - rid: darwin-x64
-            runner: macos-15-intel # the last x86_64 macOS image; available until August 2027
-            allow_no_adapter: "1"
+          # Intel macOS is not a target — see the note in wgpu-native.manifest.ts.
 
     steps:
       - uses: actions/checkout@v4

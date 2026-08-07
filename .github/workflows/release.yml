@@ -34,7 +34,7 @@
 #      default to `npm publish`, and one created without a selection publishes nothing.
 #   4. Confirm the package's `repository.url` matches.
 #
-# That is six configurations for five platforms. It is a one-time cost multiplied by the number of
+# That is five configurations for four platforms. It is a one-time cost multiplied by the number of
 # packages, and it is exactly the kind of thing that gets half-done: a root package that publishes
 # and platform packages that 403, which surfaces as an install that resolves nothing.
 #
@@ -71,10 +71,10 @@ jobs:
       - run: bun run typecheck
 
       - name: Fetch every pinned platform archive
-        # Cross-fetching works, so one runner can stage all five platform packages. Each download is
+        # Cross-fetching works, so one runner can stage all four platform packages. Each download is
         # verified against its pinned sha256 and hard-fails on mismatch.
         run: |
-          for rid in win32-x64 darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+          for rid in win32-x64 darwin-arm64 linux-x64 linux-arm64; do
             bun run fetch --rid "$rid"
           done
 
@@ -124,7 +124,7 @@ jobs:
 
       - name: Fetch every pinned platform archive
         run: |
-          for rid in win32-x64 darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+          for rid in win32-x64 darwin-arm64 linux-x64 linux-arm64; do
             bun run fetch --rid "$rid"
           done
 

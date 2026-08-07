@@ -12,7 +12,7 @@
  * `Symbol "…" not found in "…"`; declaring one that does exist succeeds. Because we never *invoke*
  * the resulting function, the declared signature is irrelevant — `() => void` is fine for every
  * symbol regardless of its real prototype. The alternative, parsing PE / ELF / Mach-O export tables,
- * would mean three format readers to cover five platforms.
+ * would mean three format readers to cover four platforms.
  */
 import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";

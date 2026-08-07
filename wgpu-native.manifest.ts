@@ -93,10 +93,11 @@ export const ASSETS: Partial<Record<Rid, IArchiveAsset>> = {
     url: "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-aarch64-release.zip",
     sha256: "a5797a37b1adf720bcd5dcffb291edbbd5b7b14be0a3874c28e6393a655a7a3e",
   },
-  "darwin-x64": {
-    url: "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-macos-x86_64-release.zip",
-    sha256: "8e2f7378548ddd0e2cf21e7d864dda46e953f0af724855a33778b85ead206d41",
-  },
+  // Intel macOS is deliberately NOT a target. Apple has finished its own x86_64 transition, the
+  // hosted runner image for it has an announced end date, and it is one of only two SysV x86-64
+  // targets — the ABI where `bun:ffi` cannot express a by-value aggregate and a compiled shim is
+  // required. Dropping it removes half the audience for that shim without removing the need for it:
+  // `linux-x64` is the other, and is not optional.
   "linux-x64": {
     url: "https://github.com/gfx-rs/wgpu-native/releases/download/v29.0.1.1/wgpu-linux-x86_64-release.zip",
     sha256: "95a4d90c071005a98d03eab348beaa6b07e16eb00d1dcdb9f8348f75eb97ec5a",

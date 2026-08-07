@@ -149,7 +149,7 @@ function assertScalarTag(tag: string, where: string): CScalarTag {
  * The registry every consumer uses: the generated tables under the 64-bit C ABI.
  *
  * The host check runs once, here, at first import. Every supported RID — `win32-x64`, `linux-x64`,
- * `linux-arm64`, `darwin-x64`, `darwin-arm64` — produces *identical* layouts, because every member
+ * `linux-arm64`, `darwin-arm64` — produces *identical* layouts, because every member
  * of both headers is either a fixed-width `<stdint.h>` scalar, a `float`/`double`, an enum, a
  * pointer, a `size_t`, or an aggregate of those. Nothing is a `long`, a `long double`, a bitfield or
  * an array, and those are the only places Win64 (LLP64) and the Unix targets (LP64) disagree.

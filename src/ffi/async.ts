@@ -232,8 +232,25 @@ function yieldTurn(spin: number): Promise<void> {
  * @param pump   what to call each turn to give wgpu-native a chance to deliver.
  * @param begin  issues the native call, having been handed the ticket to embed in `userdata1`.
  *
- * There is no exit from the wait other than the callback firing. That is the point.
+ * The only way to a RESULT is the callback firing — there is no default, no sentinel and no
+ * "assume success after N turns". That is the property that keeps an unpumped operation from
+ * reporting "no error" for a case that genuinely failed.
+ *
+ * ── Why there is nonetheless a deadline ─────────────────────────────────────────────────────────
+ *
+ * An earlier revision had no exit at all, on the reasoning that a hang is the honest failure. In
+ * practice it is not: the first CI run to reach this code on AArch64 sat in `requestAdapter` until
+ * the job's own limit, produced no diagnosis, and burned a runner for hours. A hang tells you
+ * nothing about WHICH call stalled, and on a machine nobody is watching it is indistinguishable
+ * from slow.
+ *
+ * Throwing after a deadline keeps the property that matters — this function still never invents a
+ * result — while turning "stuck forever, cause unknown" into a named, actionable failure. The
+ * distinction is between refusing to answer and answering wrongly; only the second was ever the
+ * thing to protect against.
  */
+const SETTLE_DEADLINE_MS = 30_000;
+
 export async function settle<T>(pump: () => void, begin: (ticket: Ticket) => void): Promise<T> {
   let done = false;
   let result!: T;
@@ -246,9 +263,21 @@ export async function settle<T>(pump: () => void, begin: (ticket: Ticket) => voi
     throw error;
   }
 
+  const startedAt = performance.now();
   for (let spin = 0; !done; spin++) {
     pump();
     await yieldTurn(spin);
+    if (!done && performance.now() - startedAt > SETTLE_DEADLINE_MS) {
+      disarm(ticket);
+      throw new Error(
+        `wgpu-bun: a native asynchronous call did not complete within ${SETTLE_DEADLINE_MS} ms ` +
+          `(${spin + 1} pump turns on ${process.platform}-${process.arch}).\n` +
+          `  The operation was issued and its callback never fired. wgpu-native delivers only on\n` +
+          `  poll, so this is either a driver/adapter that never answers, or a call whose argument\n` +
+          `  passing is wrong for this ABI — the latter is expected wherever src/ffi/abiSeam.ts\n` +
+          `  reports that it cannot express by-value aggregates.`,
+      );
+    }
   }
   return result;
 }

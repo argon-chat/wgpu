@@ -193,7 +193,7 @@ expose, so adopting one changes that file and nothing else.
 ## Scope
 
 **Targets:** wgpu-native `v29.0.1.1` (wgpu-core 29.x) · Bun ≥ 1.4 · headless compute and offscreen
-render-to-texture on `win32-x64`, `darwin-arm64`, `darwin-x64`, `linux-x64`, `linux-arm64`.
+render-to-texture on `win32-x64`, `darwin-arm64`, `linux-x64`, `linux-arm64`.
 
 ### The compatibility contract, precisely
 

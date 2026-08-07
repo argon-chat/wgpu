@@ -17,8 +17,8 @@
  *
  * ── Platform axis ───────────────────────────────────────────────────────────────────────────────
  *
- * **Invariant across all five supported RIDs** (`win32-x64`, `linux-x64`, `linux-arm64`,
- * `darwin-x64`, `darwin-arm64`): every offset and size here. Both headers use only fixed-width
+ * **Invariant across all four supported RIDs** (`win32-x64`, `linux-x64`, `linux-arm64`,
+ * `darwin-arm64`): every offset and size here. Both headers use only fixed-width
  * `<stdint.h>` scalars, `float`/`double`, C enums, pointers, `size_t`, and aggregates of those. No
  * `long`, no `long double`, no bitfields, no arrays — so LLP64 (Windows) and LP64 (Unix) cannot
  * diverge, and x86-64 and AArch64 agree on natural alignment for everything present.

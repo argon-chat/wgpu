@@ -93,7 +93,7 @@ export interface ICAbiModel {
 /**
  * The one model this package ships layouts for: 64-bit, natural alignment.
  *
- * Every supported RID — `win32-x64`, `linux-x64`, `linux-arm64`, `darwin-x64`, `darwin-arm64` —
+ * Every supported RID — `win32-x64`, `linux-x64`, `linux-arm64`, `darwin-arm64` —
  * lands here. Win64 (LLP64) and the Unix targets (LP64) differ only in `sizeof(long)`, and no member
  * of either header is a `long`, so the resulting layouts are **identical across all five**. See
  * {@link assertHost64Bit} for what happens on anything else.
@@ -133,7 +133,7 @@ export function assertHost64Bit(arch: string = process.arch): void {
  * Refuse to run where multi-byte scalars are stored the other way round.
  *
  * Every C struct built by this package is written through a `DataView` with `littleEndian: true`,
- * which is correct on all five supported RIDs and silently wrong anywhere else. This is one branch
+ * which is correct on all four supported RIDs and silently wrong anywhere else. This is one branch
  * at startup against a class of corruption that would otherwise present as "the GPU renders
  * garbage".
  *

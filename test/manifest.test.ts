@@ -25,7 +25,7 @@ import {
 } from "../wgpu-native.manifest.ts";
 
 /** The platforms this package claims to support. Changing this list is a release decision. */
-const EXPECTED_RIDS = ["win32-x64", "darwin-arm64", "darwin-x64", "linux-x64", "linux-arm64"] as const;
+const EXPECTED_RIDS = ["win32-x64", "darwin-arm64", "linux-x64", "linux-arm64"] as const;
 
 describe("the pinned release", () => {
   test("the tag and the major agree", () => {
