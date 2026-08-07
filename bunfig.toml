@@ -1,0 +1,16 @@
+# Bun configuration for wgpu-bun.
+#
+# Bun reads bunfig from the current working directory, so this file governs commands run from inside
+# this package. Keeping one here rather than relying on an ambient parent config is the isolation a
+# standalone package needs: `bun test` must mean the same thing wherever the checkout lives.
+
+[install]
+# Pin, don't range. Same reasoning as `wgpu-native.manifest.ts` applies one level up: a binding whose
+# job is byte-exact GPU behaviour should not have its own dependency graph drift underneath it.
+exact = true
+
+[test]
+root = "test"
+# GPU work is slow to start — adapter request, device creation, shader compiles. The default 5s
+# timeout turns that into flaky false negatives on a cold or busy machine.
+timeout = 30000

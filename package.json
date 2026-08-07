@@ -1,0 +1,81 @@
+{
+  "name": "wgpu-bun",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Bun FFI binding to wgpu-native, API-compatible with the `webgpu` npm package. Pre-alpha: skeleton only.",
+  "license": "MIT",
+  "author": "Yuuki Wesp <y.wesp@argon.gl>",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/argon-chat/wgpu.git"
+  },
+  "homepage": "https://github.com/argon-chat/wgpu#readme",
+  "bugs": {
+    "url": "https://github.com/argon-chat/wgpu/issues"
+  },
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "bun": "./src/index.ts",
+      "import": "./src/index.ts"
+    },
+    "./manifest": {
+      "types": "./wgpu-native.manifest.ts",
+      "bun": "./wgpu-native.manifest.ts",
+      "import": "./wgpu-native.manifest.ts"
+    }
+  },
+  "files": [
+    "src",
+    "scripts/fetch-wgpu-native.ts",
+    "wgpu-native.manifest.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "webgpu",
+    "wgpu",
+    "wgpu-native",
+    "bun",
+    "ffi",
+    "gpu",
+    "graphics",
+    "compute"
+  ],
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "os": [
+    "win32",
+    "darwin",
+    "linux"
+  ],
+  "cpu": [
+    "x64",
+    "arm64"
+  ],
+  "scripts": {
+    "fetch": "bun run scripts/fetch-wgpu-native.ts",
+    "fetch:hashes": "bun run scripts/fetch-wgpu-native.ts --update-hashes",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "gen:layouts": "bun run scripts/gen-layouts.ts",
+    "check:layouts": "bun run scripts/gen-layouts.ts --check",
+    "check:upstream": "bun run scripts/check-upstream.ts",
+    "derive:aborts:source": "bun run scripts/derive-abort-symbols.ts",
+    "derive:aborts:probe": "bun run scripts/derive-unimplemented.ts",
+    "release:check": "bun run scripts/release-platform-packages.ts --check",
+    "release:stage": "bun run scripts/release-platform-packages.ts",
+    "release:wire": "bun run scripts/release-platform-packages.ts --wire"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.8",
+    "typescript": "^5.8.3"
+  },
+  "dependencies": {
+    "@webgpu/types": "^0.1.69"
+  }
+}

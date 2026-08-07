@@ -1,0 +1,32 @@
+{
+  // Fully self-contained on purpose — no shared base config to extend, so a fresh clone typechecks
+  // with nothing but this file. Deliberately free of DOM/JSX/decorator settings: a headless GPU
+  // binding has no business carrying them.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "ESNext"],
+
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitOverride": true,
+    "forceConsistentCasingInFileNames": true,
+
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+
+    // No emit: Bun consumes the TypeScript sources directly, which is the whole point of a
+    // Bun-only package — no build step, no dist/, no source-map drift.
+    "noEmit": true,
+
+    // `@webgpu/types` is the compat contract (see src/types.ts); `bun` brings `bun:ffi` and Bun.spawn.
+    "types": ["@webgpu/types", "bun"]
+  },
+  "include": ["src/**/*", "scripts/**/*", "test/**/*", "wgpu-native.manifest.ts"]
+}

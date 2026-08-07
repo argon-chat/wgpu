@@ -1,0 +1,228 @@
+# Continuous integration for wgpu-bun.
+#
+# ── The problem this matrix is shaped around ────────────────────────────────────────────────────
+#
+# Most of what this package must prove needs a real GPU, and hosted CI runners mostly do not have
+# one. The naive resolution — skip the GPU tests when no adapter is present — produces a green run in
+# which nothing was tested. That is the same silent-green failure the package's error path exists to
+# prevent, one level up, and it is worse here because it is invisible: a skipped job and a passed job
+# look identical in the checks list.
+#
+# So the structure is:
+#
+#   1. **Every leg runs something substantial without a GPU.** The struct-layout oracle compiles the
+#      pinned headers and checks 115 aggregates with `sizeof`/`offsetof` — compile-time, no linking,
+#      no device. The abort-symbol blocklist reads the export table. Packaging and manifest checks
+#      read files. A GPU-less runner still has real work to fail at.
+#   2. **A missing adapter must be permitted explicitly, per leg**, via `WGPU_BUN_ALLOW_NO_ADAPTER`.
+#      Where it is granted, the reason is in the matrix entry next to it. Where it is not, the run
+#      fails.
+#   3. **The run as a whole insists that some leg really ran the GPU tests.** `gpu-coverage` reads
+#      one marker per leg and fails if none of them reached a device. Five individually-defensible
+#      skips must not add up to a meaningless pass.
+#
+# ── Software adapters ───────────────────────────────────────────────────────────────────────────
+#
+#   Linux    — Mesa's lavapipe (`mesa-vulkan-drivers` + `libvulkan1`) is a CPU Vulkan 1.3+ driver.
+#              This is the mechanism wgpu's own CI uses; it is slow but it is a genuine adapter, and
+#              wgpu-native's Vulkan backend enumerates it without special pleading.
+#   Windows  — WARP, the D3D12 software rasteriser, ships with Windows and needs no install. Whether
+#              wgpu-native's D3D12 backend selects it on a hosted runner is not verified here; the
+#              leg therefore permits a skip and reports which way it went rather than asserting.
+#   macOS    — no software adapter exists. Hosted macOS runners expose a paravirtualised Metal
+#              device, which *should* be enough, but that is inference and not measurement. Both
+#              macOS legs permit a skip and report.
+#
+# Everything above marked "not verified" is exactly what this workflow's first run measures. The
+# preflight step prints the adapter on every leg, so the answer arrives as data in the run summary
+# instead of as an assumption in a comment.
+
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Cheap, host-independent checks. Fails the run before five legs spend time on it. ───────────
+  static:
+    name: typecheck + upstream pin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Abort-symbol blocklist matches upstream source at the pinned tag
+        # The 35 bare `unimplemented!()` stubs leave no name in the compiled library, so they can
+        # only be re-derived from upstream's Rust source. That needs network, which is why it is a
+        # job of its own rather than part of the offline suite.
+        run: bun run derive:aborts:source -- --check
+
+  test:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    needs: static
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-latest
+            # lavapipe is a real, installable adapter here. No excuse is granted: if it does not
+            # come up, that is a finding and the leg should go red.
+            allow_no_adapter: "0"
+          - rid: linux-arm64
+            runner: ubuntu-24.04-arm # free for public repositories; unavailable in private ones
+            allow_no_adapter: "0"
+          - rid: win32-x64
+            runner: windows-latest
+            # WARP ships with Windows, but whether wgpu-native's D3D12 backend enumerates it on a
+            # hosted runner is unverified. Permitted, and reported either way.
+            allow_no_adapter: "1"
+          - rid: darwin-arm64
+            runner: macos-15
+            # Paravirtualised Metal. Expected to work; not measured.
+            allow_no_adapter: "1"
+          - rid: darwin-x64
+            runner: macos-15-intel # the last x86_64 macOS image; available until August 2027
+            allow_no_adapter: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install a software Vulkan adapter (lavapipe)
+        if: startsWith(matrix.runner, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1 vulkan-tools
+          vulkaninfo --summary || echo "vulkaninfo failed; the preflight step will report what wgpu sees"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Fetch the pinned wgpu-native
+        # Pinned by URL + sha256; a mismatch hard-fails here rather than surfacing as a strange
+        # runtime error later.
+        run: bun run fetch
+
+      - name: Check generated struct layouts against the fetched headers
+        # Ordering matters and is enforced by the oracle itself: it compares the headers' sha256
+        # against the provenance recorded alongside the generated layouts, so a bumped pin with
+        # stale generated code fails here instead of silently producing wrong offsets.
+        #
+        # This step needs no GPU and no linking — `sizeof`/`offsetof` are compile-time — so it is
+        # the substantive thing every leg can assert even where the GPU tests cannot run.
+        #
+        # NOTE: the oracle has only ever been executed on win32-x64. It stages shim headers that
+        # shadow the system ones, and whether that survives on Linux and macOS is exactly what this
+        # matrix measures. A failure here is a finding about the PROBE first and about the layouts
+        # second — check the compiler diagnostics before concluding an offset is wrong.
+        run: bun run check:layouts
+
+      - name: GPU preflight
+        # Always exits 0. It reports the adapter and writes the marker `gpu-coverage` reads; the
+        # decision about whether a missing adapter is fatal belongs to the test suite alone.
+        env:
+          WGPU_BUN_ALLOW_NO_ADAPTER: ${{ matrix.allow_no_adapter }}
+        run: bun run test/support/preflight.ts --marker gpu-markers/${{ matrix.rid }}.json
+
+      - name: Test
+        env:
+          WGPU_BUN_ALLOW_NO_ADAPTER: ${{ matrix.allow_no_adapter }}
+          # Never granted: `bun run fetch` ran two steps ago, so an absent library is a real failure.
+          WGPU_BUN_ALLOW_NO_LIBRARY: "0"
+        run: bun test
+
+      - name: Upload GPU coverage marker
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gpu-marker-${{ matrix.rid }}
+          path: gpu-markers/${{ matrix.rid }}.json
+          if-no-files-found: warn
+
+  # ── The aggregate gate. Five defensible skips must not add up to a meaningless pass. ───────────
+  gpu-coverage:
+    name: at least one leg ran on a real device
+    runs-on: ubuntu-latest
+    needs: test
+    if: always()
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gpu-marker-*
+          path: markers
+          merge-multiple: true
+
+      - name: Require a device somewhere in the matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "## GPU coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| platform | GPU suites | adapter |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+
+          ready=0
+          total=0
+          unimplemented=0
+          shopt -s nullglob
+          for f in markers/*.json; do
+            total=$((total+1))
+            gate=$(grep -o '"gate": *"[^"]*"' "$f" | cut -d'"' -f4)
+            plat=$(grep -o '"platform": *"[^"]*"' "$f" | cut -d'"' -f4)
+            adapter=$(grep -o '"adapter": *"[^"]*"' "$f" | cut -d'"' -f4 || true)
+            case "$gate" in
+              ready)
+                ready=$((ready+1))
+                echo "| \`$plat\` | ran | ${adapter:-?} |" >> "$GITHUB_STEP_SUMMARY" ;;
+              unimplemented)
+                unimplemented=$((unimplemented+1))
+                echo "| \`$plat\` | n/a (binding unimplemented) | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+              *)
+                echo "| \`$plat\` | **skipped** ($gate) | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+            esac
+          done
+
+          if [ "$total" -eq 0 ]; then
+            # No markers at all means the matrix did not run, which must never read as coverage.
+            echo "::error title=wgpu-bun::No preflight markers were produced — the matrix did not run."
+            exit 1
+          fi
+
+          if [ "$ready" -gt 0 ]; then
+            echo "$ready of $total leg(s) exercised a real device."
+            exit 0
+          fi
+
+          if [ "$unimplemented" -eq "$total" ]; then
+            # Pre-alpha: `create()` throws everywhere, so no leg CAN reach a device and a red gate
+            # here would just be noise. The moment the binding starts returning a GPU, this branch
+            # stops being taken and the hard failure below applies again — which is the point, and
+            # is why it keys on the gate rather than on a flag someone could leave switched on.
+            echo "::warning title=wgpu-bun::No GPU coverage: the binding is unimplemented on every \
+          leg, so nothing could run. Expected while pre-alpha; this gate turns hard the moment \
+          create() returns a GPU."
+            exit 0
+          fi
+
+          echo "::error title=wgpu-bun::No leg of the matrix reached a GPU device, and at least one \
+          leg could have. Every GPU test in this run was skipped, so the run proves nothing about \
+          the binding. Hard failure on purpose — see .github/workflows/ci.yml."
+          exit 1

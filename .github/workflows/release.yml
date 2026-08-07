@@ -1,0 +1,166 @@
+# Publish wgpu-bun and its per-platform native packages to npm.
+#
+# ── Trusted publishing: read this before renaming anything ──────────────────────────────────────
+#
+# This workflow publishes with **no `NPM_TOKEN`**. npm's trusted publishing exchanges a short-lived
+# GitHub OIDC token for publish rights, so there is no long-lived secret to leak, rotate, or paste
+# into the wrong repository. Two consequences worth internalising:
+#
+#   ⚠ **The filename of this workflow is part of the credential.** npm matches the publish request
+#     against the workflow file recorded in the package's trusted-publisher configuration —
+#     `release.yml`, case-sensitive, extension included. Renaming this file, or moving it, breaks
+#     publishing with an authorization error that names nothing useful. Rename the config on
+#     npmjs.com in the same change or do not rename it at all.
+#
+#   ⚠ **`repository.url` in each package.json must match this GitHub repository**, exactly. Same
+#     failure mode: an unhelpful authorization error rather than a mismatch message. There are N+1
+#     package.json files here (the root plus one per platform), so this is N+1 chances to get it
+#     wrong. `bun run release:check` refuses to proceed when the root's is missing.
+#
+# **Provenance is automatic.** Publishing via trusted publishing from a public repository to a public
+# package makes npm generate and publish the attestation itself. Do **not** pass `--provenance`; it
+# is unnecessary and its presence suggests the token path is in use.
+#
+# Requirements, all of which the steps below satisfy: `id-token: write`, npm CLI ≥ 11.5.1,
+# Node ≥ 22.14.0, a public repository, a public package, and a **GitHub-hosted** runner —
+# self-hosted runners are not supported for trusted publishing.
+#
+# ── One-time setup, per package ─────────────────────────────────────────────────────────────────
+#
+# On npmjs.com, for the root package `wgpu-bun` **and for each `@wgpu-bun/<rid>`**:
+#   1. Settings → Trusted publisher → GitHub Actions.
+#   2. Owner + repository + workflow filename `release.yml` (+ environment, if one is set below).
+#   3. Select the allowed action explicitly — configurations created after 2026-05-20 do not
+#      default to `npm publish`, and one created without a selection publishes nothing.
+#   4. Confirm the package's `repository.url` matches.
+#
+# That is six configurations for five platforms. It is a one-time cost multiplied by the number of
+# packages, and it is exactly the kind of thing that gets half-done: a root package that publishes
+# and platform packages that 403, which surfaces as an install that resolves nothing.
+#
+# ── What gates a release ────────────────────────────────────────────────────────────────────────
+#
+# Deliberately NOT the GPU matrix. GPU coverage lives in `ci.yml`, where legs are permitted to skip
+# on runners that have no device — so making this workflow depend on it would either block releases
+# on an environment nobody controls, or accept a skipped leg as a pass. Neither is acceptable, so
+# they are separated: `ci.yml` owns "does it work", this workflow owns "is it publishable", and the
+# link between them is a branch protection rule requiring `ci` to be green on the release commit.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  # ── Everything that can be checked without a GPU, on one runner, before anything is published. ─
+  verify:
+    name: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+
+      - name: Fetch every pinned platform archive
+        # Cross-fetching works, so one runner can stage all five platform packages. Each download is
+        # verified against its pinned sha256 and hard-fails on mismatch.
+        run: |
+          for rid in win32-x64 darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun run fetch --rid "$rid"
+          done
+
+      - run: bun run check:layouts
+      - run: bun run derive:aborts:source -- --check
+
+      - name: Test (no GPU on this runner)
+        # The GPU suites skip here by design; `ci.yml` is where they are required to run. What this
+        # proves is the platform-independent half — layouts, blocklist, packaging, compat surface.
+        env:
+          WGPU_BUN_ALLOW_NO_ADAPTER: "1"
+        run: bun test
+
+      - name: Release preflight
+        # Refuses on a missing `repository.url`, on `"private": true`, and on any platform whose
+        # archive did not land.
+        run: bun run release:check
+
+  publish:
+    name: publish to npm
+    runs-on: ubuntu-latest # GitHub-hosted: trusted publishing does not work on self-hosted runners
+    needs: verify
+    permissions:
+      id-token: write # the OIDC token that replaces NPM_TOKEN
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22" # trusted publishing requires Node >= 22.14.0
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Ensure an npm CLI new enough for trusted publishing
+        # >= 11.5.1. The image's bundled npm is usually older, and an older CLI falls back to token
+        # auth — which, with no token present, fails as an authentication error rather than as a
+        # version problem.
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Fetch every pinned platform archive
+        run: |
+          for rid in win32-x64 darwin-arm64 darwin-x64 linux-x64 linux-arm64; do
+            bun run fetch --rid "$rid"
+          done
+
+      - name: Stage the per-platform packages
+        run: bun run release:stage
+
+      - name: Wire optionalDependencies into the root package
+        # Written at release time rather than committed: until the platform packages exist on npm,
+        # a committed block would mean every `bun install` tries to resolve five 404s.
+        run: bun run release:wire
+
+      - name: Publish platform packages first
+        # Order matters. The root package's `optionalDependencies` point at these exact versions, so
+        # publishing the root first leaves a window in which `bun add wgpu-bun` resolves a binding
+        # with no library behind it.
+        #
+        # No `--provenance`: trusted publishing attaches the attestation itself.
+        run: |
+          set -euo pipefail
+          for dir in dist/npm/*/; do
+            echo "publishing $dir"
+            (cd "$dir" && npm publish --access public)
+          done
+
+      - name: Publish the root package
+        run: npm publish --access public
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published"
+            echo ""
+            echo "\`wgpu-bun\` + $(ls -1 dist/npm | wc -l) platform package(s)."
+            echo ""
+            echo "Provenance attests **this build** — that this commit produced these bytes."
+            echo "It says nothing about the origin of the bundled \`wgpu_native\` library, which is"
+            echo "covered separately by the pinned URL + sha256 in \`wgpu-native.manifest.ts\`."
+            echo "Two different guarantees; neither substitutes for the other."
+          } >> "$GITHUB_STEP_SUMMARY"

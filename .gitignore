@@ -141,3 +141,14 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# ── wgpu-bun ────────────────────────────────────────────────────────────────
+# Fetched native binaries. NEVER committed — they are pinned by version + sha256 in
+# wgpu-native.manifest.ts and materialized by `bun run fetch`. Committing them would put a ~30 MB
+# per-platform blob in git history and quietly decouple what ships from what is pinned.
+vendor/
+
+# NOTE: the design notes that briefly lived in docs/ have been moved out of this repository
+# entirely — they cite a private codebase's paths, tooling and pins, and this repository is meant
+# to be published. There is deliberately no `docs/` ignore rule here: if public documentation is
+# added later it SHOULD be committed, and a blanket ignore would silently swallow it.
