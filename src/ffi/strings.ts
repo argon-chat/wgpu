@@ -8,13 +8,34 @@
  *   - `data` may be NULL with any length, meaning "no string" — which is not the same as `""` but
  *     is indistinguishable to every consumer in the WebGPU API, so both become `""` here.
  *
- * ── Why a callback receives a pointer where C says "by value" ───────────────────────────────────
+ * ── The by-value message parameter, and the bug that lived in this comment ─────────────────────
  *
- * Every wgpu-native callback takes its `message` as a `WGPUStringView` **by value**. On Win64 a
- * 16-byte aggregate is not one of the {1,2,4,8} register-sized cases, so it is passed by hidden
- * reference and arrives as a pointer — which is why {@link readStringView} takes one. On SysV
- * x86-64 the same 16 bytes classify as INTEGER+INTEGER and arrive in **two registers** instead,
- * which is the second half of the portability problem documented in {@link ./abiSeam.ts}.
+ * Every wgpu-native callback takes its `message` as a `WGPUStringView` **by value**, and how it
+ * arrives depends on the ABI:
+ *
+ * | | Win64 | AArch64 AAPCS | SysV x86-64 |
+ * |---|---|---|---|
+ * | 16-byte `{ptr, size_t}` argument | size ∉ {1,2,4,8} → **hidden reference** | ≤16 B → **two registers** | INTEGER+INTEGER → **two registers** |
+ *
+ * Note which way that splits: **Windows is the outlier and the other three agree.** That is the
+ * opposite of the 40-byte `*CallbackInfo` case, where SysV is the outlier — same phrase "by value",
+ * different rule, different platforms.
+ *
+ * An earlier revision of this file stated both halves of that table correctly and then shipped only
+ * the Win64 half: the callbacks were declared with `message` as a single pointer. That is right on
+ * Windows and wrong on all three of `linux-x64`, `linux-arm64` and `darwin-arm64`, where the callee
+ * reads `userdata1` out of the register holding `message.length`. The correlation ticket came back
+ * as garbage, {@link import("./async.ts").dispatch} correctly ignored an unknown ticket, and the
+ * promise never settled — a hang in `requestAdapter` on three platforms at once, with no ABI error
+ * anywhere to point at the cause. It took a CI matrix to find, because the one platform that could
+ * be executed locally was the one platform it was right on.
+ *
+ * So both shapes exist here now, and neither is guessed:
+ *
+ *   - {@link readStringView} — the pointer form, used **only** on the Win64 direct path.
+ *   - {@link decodeStringParts} — the flat `(data, length)` form, fed by the shim's C trampolines,
+ *     which decode the aggregate with a compiler that knows the target's rules. Used everywhere the
+ *     shim is bound, which is every platform where a shim is installed.
  */
 
 import { CString, read, toArrayBuffer } from "bun:ffi";
@@ -40,10 +61,32 @@ export function readStringView(structPtr: number | bigint | null): string {
     const data = read.ptr(p, 0);
     if (data === 0) return "";
     const length = read.u64(p, 8);
-    if (length === WGPU_STRLEN) return new CString(asAddress(data)).toString();
-    const n = Number(length);
+    return decodeStringParts(data, length);
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Decode a `WGPUStringView` that has already been split into its two members.
+ *
+ * This is the form the shim's C trampolines deliver, and it is the one that is correct everywhere:
+ * the aggregate was taken apart by a compiler on the target rather than by a signature derived for
+ * one ABI. {@link readStringView} now funnels into it, so there is exactly one decoder and the two
+ * entry points differ only in how they got hold of the two numbers.
+ *
+ * Never throws — it runs inside native callbacks, and an exception crossing back into Rust through a
+ * `nounwind` boundary is undefined behaviour, not a stack trace.
+ */
+export function decodeStringParts(data: number | bigint | null, length: number | bigint): string {
+  if (!data) return "";
+  try {
+    const address = asAddress(data);
+    const len = typeof length === "bigint" ? length : BigInt(length);
+    if (len === WGPU_STRLEN) return new CString(address).toString();
+    const n = Number(len);
     if (n <= 0) return "";
-    return UTF8.decode(new Uint8Array(toArrayBuffer(asAddress(data), 0, n)));
+    return UTF8.decode(new Uint8Array(toArrayBuffer(address, 0, n)));
   } catch {
     return "";
   }

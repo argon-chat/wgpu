@@ -15,6 +15,7 @@
  * | `no-library`     | **hard fail**  | `WGPU_BUN_ALLOW_NO_LIBRARY=1`      |
  * | `unimplemented`  | skip           | none — see below                   |
  * | `abi-unsupported`| skip *if no shim is installed* | none — see below  |
+ * | `no-callback`    | **hard fail**  | none — see below                   |
  * | `no-adapter`     | **hard fail**  | `WGPU_BUN_ALLOW_NO_ADAPTER=1`      |
  * | `no-device`      | **hard fail**  | none                               |
  *
@@ -43,12 +44,25 @@
  * or a version-skew rejection — and it hard-fails. So the kind stops being reachable the moment the
  * artefact lands, mechanically rather than by anyone remembering to delete it.
  *
+ * ── `no-callback`, the same mistake a third time ────────────────────────────────────────────────
+ *
+ * A native call whose callback never arrives used to land here as `no-adapter` too, and it was wrong
+ * in both of the ways that matter. It named the wrong subsystem — the runners that hit it had an
+ * adapter, and `vulkaninfo` said so — and `no-adapter` is escapable by an environment variable two
+ * matrix legs are granted, so a real completion defect could be skipped past on exactly the legs
+ * most likely to have one.
+ *
+ * It is never a permitted skip. A device that never answers and a binding that mis-decodes its own
+ * callback arguments both produce it, and neither is something a run should be allowed to shrug off;
+ * the thrown error carries the seam diagnostics needed to tell them apart.
+ *
  * `no-adapter` is the one CI actually needs, because hosted runners vary. It is an env var rather
  * than auto-detection so that granting it is a visible, per-job decision in the workflow file, and
  * every skip it causes is announced on stderr and as a GitHub annotation.
  */
 import {
   AbiUnsupportedError,
+  CallbackDeadlineError,
   create,
   globals,
   IMPLEMENTED,
@@ -81,6 +95,11 @@ export type GpuGate =
    * perfectly good adapter, and on the `linux-x64` CI runner it does.
    */
   | { readonly kind: "abi-unsupported"; readonly detail: string }
+  /**
+   * A native call was issued and its callback never arrived within the deadline. **Not** a statement
+   * about the GPU either: the adapter was reached far enough to be asked. Never a permitted skip.
+   */
+  | { readonly kind: "no-callback"; readonly detail: string }
   /** The binding works but the host exposes no adapter (headless CI without a software rasteriser). */
   | { readonly kind: "no-adapter"; readonly detail: string }
   /** An adapter exists but `requestDevice` failed. Never acceptable — it means a real defect. */
@@ -134,6 +153,9 @@ async function acquire(): Promise<GpuGate> {
     if (err instanceof AbiUnsupportedError) {
       return { kind: "abi-unsupported", detail: (err as Error).message };
     }
+    if (err instanceof CallbackDeadlineError) {
+      return { kind: "no-callback", detail: (err as Error).message };
+    }
     return { kind: "no-adapter", detail: `requestAdapter() threw: ${(err as Error).message}` };
   }
   if (!adapter) {
@@ -150,6 +172,11 @@ async function acquire(): Promise<GpuGate> {
   try {
     device = await adapter.requestDevice({ label: "wgpu-bun test device" });
   } catch (err) {
+    // Same split one level down: a device request that never completes is a callback problem, not a
+    // rejected descriptor, and lumping them together loses the only clue that distinguishes them.
+    if (err instanceof CallbackDeadlineError) {
+      return { kind: "no-callback", detail: (err as Error).message };
+    }
     return { kind: "no-device", detail: `requestDevice() threw: ${(err as Error).message}` };
   }
 
@@ -220,6 +247,11 @@ export function skipIsPermitted(g: GpuGate = gate, seam: ISeamStatus = SEAM): bo
       return ALLOW_NO_ADAPTER;
     case "no-library":
       return ALLOW_NO_LIBRARY;
+    case "no-callback":
+      // Never permitted. Either the device never answers or the binding mis-decodes its own
+      // callback arguments; both are defects, and the second is the one that hid for a whole CI
+      // matrix behind a label that said "no GPU".
+      return false;
     case "no-device":
       return false;
   }

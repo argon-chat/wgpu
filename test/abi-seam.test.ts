@@ -29,18 +29,22 @@ import { fileURLToPath } from "node:url";
 
 import {
   AbiUnsupportedError,
+  CallbackDeadlineError,
   BY_VALUE_CALLBACK_INFO_FUNCTIONS,
   BY_VALUE_FUNCTIONS,
   SHIM_ABI_VERSION,
   abiExpressesByValueAggregates,
+  abiPassesLargeAggregatesByReference,
+  abiPassesStringViewByReference,
   seamStatus,
   shimFileName,
   shimIsRequired,
   tryResolveShimLibrary,
   type ISeamStatus,
 } from "../src/index.ts";
+import { callbackAddress } from "../src/ffi/async.ts";
 import { skipIsPermitted } from "./support/gpu.ts";
-import { SHIM_EXPORTS } from "../src/ffi/abiSeam.ts";
+import { CALLBACK_SLOTS, SHIM_EXPORTS, callbackTrampolines } from "../src/ffi/abiSeam.ts";
 import { sizeOf } from "../src/layouts/index.ts";
 import { WGPU_NATIVE_MAJOR, supportedRids } from "../wgpu-native.manifest.ts";
 import { rustTargetFor, shimRids } from "../shim.manifest.ts";
@@ -49,40 +53,72 @@ const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const RUST_SOURCE = fs.readFileSync(path.join(PKG_ROOT, "shim", "src", "lib.rs"), "utf-8");
 
 describe("which ABIs can express a by-value aggregate", () => {
-  // The table from `src/ffi/abiSeam.ts`, as executable assertions. Written as (platform, arch, ok)
-  // triples rather than as `process.platform` checks precisely so the hosts this machine is not can
-  // still be pinned — the whole risk lives on the platforms the author cannot run.
+  // Two aggregate sizes cross this boundary in opposite directions, and they group the platforms
+  // DIFFERENTLY. Collapsing them into one predicate is the bug that produced a binding which hung
+  // inside `requestAdapter` on three platforms at once while passing everything on Windows — so the
+  // two rules are asserted separately, and the combined answer is derived from them rather than
+  // stated a second time.
+
+  // A >16-byte aggregate ARGUMENT (`*CallbackInfo`, 40 B). SysV is the outlier.
   test.each([
-    // Win64: an aggregate whose size is not 1/2/4/8 goes by hidden reference. Proven by execution.
-    ["win32", "x64", true],
-    // AArch64 AAPCS: anything over 16 bytes is indirect, address in a register. Correct by rule.
-    ["win32", "arm64", true],
+    ["win32", "x64", true], // size ∉ {1,2,4,8} → hidden reference. Proven by execution.
+    ["win32", "arm64", true], // AAPCS: >16 B is indirect
     ["linux", "arm64", true],
     ["darwin", "arm64", true],
-    // SysV x86-64: >16 bytes is class MEMORY and is copied onto the stack. Not producible.
-    ["linux", "x64", false],
+    ["linux", "x64", false], // class MEMORY → copied onto the stack
     ["darwin", "x64", false],
-    // Anything unrecognised is assumed to need the shim. Guessing "probably fine" on an unknown ABI
-    // is how a silent stack corruption ships.
+    ["freebsd", "x64", false], // unrecognised: assume the shim is needed rather than guess
+  ] as const)("40-byte argument on %s-%s → by reference: %s", (platform, arch, expected) => {
+    expect(abiPassesLargeAggregatesByReference(platform, arch)).toBe(expected);
+  });
+
+  // A 16-byte two-integer aggregate CALLBACK PARAMETER (`WGPUStringView`). **Win64 is the outlier.**
+  test.each([
+    ["win32", "x64", true], // 128 bits ∉ {8,16,32,64} → hidden reference
+    ["win32", "arm64", false], // AAPCS: ≤16 B → two registers
+    ["linux", "arm64", false],
+    ["darwin", "arm64", false],
+    ["linux", "x64", false], // INTEGER+INTEGER → two registers
+    ["darwin", "x64", false],
+  ] as const)("16-byte callback parameter on %s-%s → by reference: %s", (platform, arch, expected) => {
+    expect(abiPassesStringViewByReference(platform, arch)).toBe(expected);
+  });
+
+  test("the two rules disagree about AArch64, and that disagreement is the whole lesson", () => {
+    // If these ever became the same function again, the defect comes straight back: AArch64 passes
+    // the 40-byte argument by reference (so the direct call is fine) and the 16-byte callback
+    // parameter in registers (so the direct callback is not). One predicate cannot say both.
+    for (const platform of ["linux", "darwin", "win32"] as const) {
+      expect(abiPassesLargeAggregatesByReference(platform, "arm64")).toBe(true);
+      expect(abiPassesStringViewByReference(platform, "arm64")).toBe(false);
+    }
+  });
+
+  test.each([
+    ["win32", "x64", true],
+    ["win32", "arm64", false],
+    ["linux", "arm64", false],
+    ["darwin", "arm64", false],
+    ["linux", "x64", false],
     ["freebsd", "x64", false],
-    ["linux", "riscv64", false],
-  ] as const)("%s-%s → %s", (platform, arch, expected) => {
+  ] as const)("the direct path is usable on %s-%s: %s", (platform, arch, expected) => {
+    // Both questions must answer yes, which is Win64 and nowhere else.
     expect(abiExpressesByValueAggregates(platform, arch)).toBe(expected);
     expect(shimIsRequired(platform, arch)).toBe(!expected);
   });
 
-  test("exactly one supported RID has no correct direct path", () => {
-    // Worth stating as a number: it is the reason the shim is affordable at all, and the reason the
-    // decision to build it for every platform is about *where code gets exercised* rather than about
-    // how many platforms are broken without it.
+  test("three of the four supported RIDs have no correct direct path", () => {
+    // An earlier revision put this at one, on the strength of the 40-byte rule alone. The callback
+    // rule makes it three — which is why building the shim for every platform stopped being a
+    // judgement call about where code gets exercised and became a requirement.
     const required = supportedRids().filter((rid) => {
       const [platform, arch] = rid.split("-");
       return shimIsRequired(platform!, arch!);
     });
-    expect(required).toEqual(["linux-x64"]);
+    expect([...required].sort()).toEqual(["darwin-arm64", "linux-arm64", "linux-x64"]);
   });
 
-  test("a shim artefact is declared for every supported RID, not only the one that needs it", () => {
+  test("a shim artefact is declared for every supported RID", () => {
     expect([...shimRids()].sort()).toEqual([...supportedRids()].sort());
     for (const rid of supportedRids()) expect(rustTargetFor(rid)).toBeTruthy();
   });
@@ -99,8 +135,8 @@ describe("the hazard is stated from the header, not from memory", () => {
   });
 
   test("every wrapped function has exactly one shim export standing in for it", () => {
-    // 7 wrappers + 6 lifecycle/self-description entry points.
-    expect(SHIM_EXPORTS).toHaveLength(BY_VALUE_FUNCTIONS.length + 6);
+    // 7 argument wrappers + 6 lifecycle/self-description + 2 callback-trampoline entry points.
+    expect(SHIM_EXPORTS).toHaveLength(BY_VALUE_FUNCTIONS.length + 8);
     for (const name of SHIM_EXPORTS) expect(name.startsWith("wgpu_bun_shim_")).toBe(true);
   });
 });
@@ -123,6 +159,38 @@ describe("the Rust crate and the TypeScript seam describe the same shim", () => 
       ...RUST_SOURCE.matchAll(/pub(?:\s+unsafe)?\s+extern\s+"C"\s+fn\s+(wgpu_bun_shim_\w+)/g),
     ].map((m) => m[1]!);
     expect([...exported].sort()).toEqual([...SHIM_EXPORTS].sort());
+  });
+
+  test("the callback slot numbers are the same on both sides", () => {
+    // These cross a C boundary as bare integers on every registration. A drift here does not fail
+    // loudly: it installs the wrong trampoline, wgpu-native calls a C function with the wrong
+    // prototype, and the result is a corrupted stack or a callback that quietly never matches.
+    const rustSlots: Record<string, number> = {};
+    for (const m of RUST_SOURCE.matchAll(/const SLOT_([A-Z_]+):\s*u32\s*=\s*(\d+)/g)) {
+      rustSlots[m[1]!] = Number(m[2]);
+    }
+    expect(rustSlots).toEqual({
+      REQUEST_ADAPTER: CALLBACK_SLOTS.requestAdapter,
+      REQUEST_DEVICE: CALLBACK_SLOTS.requestDevice,
+      BUFFER_MAP: CALLBACK_SLOTS.bufferMap,
+      POP_ERROR_SCOPE: CALLBACK_SLOTS.popErrorScope,
+      QUEUE_WORK_DONE: CALLBACK_SLOTS.queueWorkDone,
+    });
+  });
+
+  test("the crate declares a trampoline for every slot the seam can ask for", () => {
+    const trampolines = [...RUST_SOURCE.matchAll(/unsafe extern "C" fn (tramp_\w+)\(/g)].map((m) => m[1]!);
+    expect(trampolines).toHaveLength(Object.keys(CALLBACK_SLOTS).length);
+    // And each one takes the message BY VALUE — a `WGPUStringView` parameter, not a pointer. That
+    // is the entire reason they exist; a trampoline declared with `*const WGPUStringView` would
+    // compile, run, and reintroduce the defect.
+    for (const name of trampolines) {
+      const body = RUST_SOURCE.slice(RUST_SOURCE.indexOf(`fn ${name}(`));
+      const signature = body.slice(0, body.indexOf(")"));
+      expect(signature, `${name} must take message: WGPUStringView by value`).toContain(
+        "message: WGPUStringView",
+      );
+    }
   });
 
   test("the flat-ABI version is the same number on both sides", () => {
@@ -218,6 +286,30 @@ describe("the skip policy distinguishes an absent shim from a rejected one", () 
     expect(skipIsPermitted(gate, present)).toBe(false);
   });
 
+  test("`no-callback` is never permitted, shim or no shim", () => {
+    // The third member of this family. A callback that never arrives was also being filed as
+    // `no-adapter` — which is escapable by an env var two CI legs are granted, so the one failure
+    // mode most likely to appear on those legs was the one most easily skipped past.
+    const absent: ISeamStatus = { mode: "refuse", shim: null, shimRequired: true, reason: "" };
+    const present: ISeamStatus = {
+      mode: "shim",
+      shim: { path: "/x/libwgpu_bun_shim.so", source: "vendor", includeDir: null, version: "2.0.0" },
+      shimRequired: true,
+      reason: "",
+    };
+    expect(skipIsPermitted({ kind: "no-callback", detail: "" }, absent)).toBe(false);
+    expect(skipIsPermitted({ kind: "no-callback", detail: "" }, present)).toBe(false);
+  });
+
+  test("the deadline error is its own class, so the gate can tell it from a driver problem", () => {
+    const err = new CallbackDeadlineError("x");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("CallbackDeadlineError");
+    // And it is NOT an ABI refusal: the two have different policies (one skips while an artefact is
+    // missing, the other never skips), so collapsing them would re-open the hole.
+    expect(err).not.toBeInstanceOf(AbiUnsupportedError);
+  });
+
   test("`no-device` is never permitted, shim or no shim", () => {
     // The control case: proof the policy is not simply returning whatever was asked of it.
     const absent: ISeamStatus = { mode: "refuse", shim: null, shimRequired: true, reason: "" };
@@ -274,5 +366,22 @@ describe.skipIf(shim === null)("the installed shim agrees with this package abou
   test("an unknown sizeof selector answers 0 rather than guessing", () => {
     const s = dlopen(shim!.path, symbols).symbols;
     expect(Number(s.wgpu_bun_shim_sizeof(999))).toBe(0);
+  });
+
+  test("what gets installed in WGPUCallbackInfo.callback is the trampoline, not the JSCallback", () => {
+    // The check that the indirection is actually happening. If `callbackAddress` ever returned the
+    // JSCallback's own pointer while the shim was bound, wgpu-native would call a bun:ffi callback
+    // with a by-value WGPUStringView — which is the original defect, restored, on a build that
+    // otherwise looks correct.
+    const trampolines = callbackTrampolines();
+    if (!trampolines) return; // direct path bound on this host; covered by the truth table above
+    for (const slot of Object.keys(CALLBACK_SLOTS) as (keyof typeof CALLBACK_SLOTS)[]) {
+      const installed = callbackAddress(slot);
+      expect(installed).toBe(trampolines.address(slot));
+      expect(installed).toBeGreaterThan(0);
+    }
+    // Five distinct trampolines, not one shared one — each has a different C prototype.
+    const all = (Object.keys(CALLBACK_SLOTS) as (keyof typeof CALLBACK_SLOTS)[]).map(callbackAddress);
+    expect(new Set(all).size).toBe(all.length);
   });
 });

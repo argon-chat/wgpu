@@ -35,19 +35,42 @@
  * | **AArch64 AAPCS** (win/linux arm64, Apple silicon) | size > 16 → indirect, address in a register | **correct by rule** — not executed here |
  * | **SysV x86-64** (Linux x64, Intel macOS) | size > 16 → class MEMORY → **copied onto the stack** | **WRONG.** A pointer in `RDX` where 40 bytes of stack were expected is garbage. |
  *
- * There is a second, subtler SysV case: a 16-byte aggregate of two integer-class members
- * (`WGPUSupportedFeatures`, and every `WGPUStringView`) classifies as INTEGER+INTEGER and is passed
- * in **two registers**, so a pointer is wrong there too — differently wrong, and not detectable by
- * size alone.
+ * ── The second case, which is where this actually went wrong ───────────────────────────────────
  *
- * ── How the hole is filled: a compiled shim ─────────────────────────────────────────────────────
+ * A 16-byte aggregate of two integer-class members (`WGPUSupportedFeatures`, and every
+ * `WGPUStringView`) classifies as INTEGER+INTEGER under SysV and is passed in **two registers** —
+ * differently wrong from the 40-byte case, and not detectable by size. Under AAPCS the same 16 bytes
+ * are ≤16 and therefore also go in **two registers**. Only Win64 passes them by hidden reference,
+ * because 128 bits is not one of {8,16,32,64}.
  *
- * On SysV x86-64 this module **cannot be made correct in JavaScript**. So the calling sequence is
+ * | | Win64 | AArch64 AAPCS | SysV x86-64 |
+ * |---|---|---|---|
+ * | 40-byte aggregate **argument** | hidden reference | indirect | **stack** |
+ * | 16-byte aggregate, incl. every **callback** `message` | hidden reference | **two registers** | **two registers** |
+ *
+ * **The two rows group the platforms differently, and that is the whole trap.** Row one makes SysV
+ * the outlier; row two makes Win64 the outlier. An earlier revision read row one, concluded that
+ * Win64 and AArch64 were both safe, and shipped a callback signature that declared `message` as a
+ * single pointer — correct on Windows, wrong on `linux-x64`, `linux-arm64` and `darwin-arm64` alike.
+ *
+ * The symptom was not a crash. The callee read the correlation ticket out of the register holding
+ * `message.length`, `dispatch` correctly ignored the resulting unknown ticket, and the promise never
+ * settled: a hang inside `requestAdapter` on three platforms simultaneously, with nothing anywhere
+ * reporting an ABI problem. It survived every local run because the one platform available locally
+ * was the one platform it was right on.
+ *
+ * ── How the hole is filled: a compiled shim, in both directions ────────────────────────────────
+ *
+ * Outside Win64 this module **cannot be made correct in JavaScript**. So the calling sequence is
  * bought from a compiler instead: `shim/` is a small Rust `cdylib` that declares these aggregates as
- * real `#[repr(C)]` structs and re-exports the seven functions with flat pointer parameters. Because
- * every call site here already hands over a pointer to an already-packed buffer, the shim's
- * signature *is* the signature this module was already using — adopting it changed which library
- * gets opened and nothing else.
+ * real `#[repr(C)]` structs and gives JavaScript a flat surface both ways —
+ *
+ *   - **going in**: the seven entry points re-exported with pointer parameters. Because every call
+ *     site here already hands over a pointer to an already-packed buffer, the shim's signature *is*
+ *     the signature this module was already using.
+ *   - **coming back**: five C trampolines with the real callback prototypes, which take the
+ *     by-value `WGPUStringView` and forward `(data, length)` to a flat JavaScript function. See
+ *     {@link callbackTrampolines} and `src/ffi/async.ts`.
  *
  * The shim resolves wgpu-native at runtime, by the same absolute path this package resolved, so
  * there is exactly one wgpu-native instance in the process. It is checked on load for its flat-ABI
@@ -60,18 +83,21 @@
  * | State | When | |
  * |---|---|---|
  * | `shim`   | a shim library resolved | preferred on **every** platform |
- * | `direct` | no shim, but the ABI passes these aggregates by hidden reference | Win64, AArch64 |
- * | `refuse` | no shim and the ABI cannot express it | SysV x86-64 |
+ * | `direct` | no shim, and **both** by-value rules permit a pointer | **Win64 only** |
+ * | `refuse` | no shim, and either rule does not | SysV x86-64, and all of AArch64 |
  *
- * Preferring the shim everywhere is deliberate: it means the code that runs on Linux x64 is the code
- * that has been executed on every test run on a machine with a real GPU and a debugger, rather than
- * a path whose first execution is on the platform where a mistake is hardest to diagnose. The
- * reasoning is set out in full in `shim.manifest.ts`.
+ * `direct` is Win64-only because it has to satisfy both rows of the table above, and AArch64 fails
+ * the second. That is a narrowing of what this file previously claimed.
  *
- * Keeping `direct` as a fallback costs one branch and preserves something worth preserving: a fresh
- * checkout with no Rust toolchain and no published artefact behaves on Windows and ARM exactly as it
- * did before the shim existed. On SysV there is no fallback because there is nothing correct to fall
- * back to; {@link assertSeamUsable} refuses rather than corrupting the stack.
+ * Preferring the shim everywhere is deliberate: it means the code that runs on Linux and macOS is
+ * the code that has been executed on every test run on a machine with a real GPU and a debugger,
+ * rather than a path whose first execution is on the platform where a mistake is hardest to
+ * diagnose. The reasoning is set out in full in `shim.manifest.ts`.
+ *
+ * Keeping `direct` at all costs one branch and preserves one thing worth preserving: a fresh
+ * checkout with no Rust toolchain and no published artefact still works on Windows, which is where
+ * most people meet the package first. Everywhere else there is nothing correct to fall back to, and
+ * {@link assertSeamUsable} refuses rather than corrupting a stack or dropping a ticket.
  *
  * `WGPU_BUN_SEAM=shim|direct|auto` forces the choice. `direct` on SysV is refused even when asked
  * for — an override may select between correct paths, never select an incorrect one.
@@ -138,7 +164,31 @@ const SHIM_SYMBOLS = {
   wgpu_bun_shim_open: { args: [p, u64], returns: i32 },
   wgpu_bun_shim_is_open: { args: [], returns: i32 },
   wgpu_bun_shim_last_error: { args: [p, u64], returns: u64 },
+
+  // The callback direction. `wgpuStringView` arrives BY VALUE in every wgpu-native callback, and the
+  // rule for a 16-byte aggregate splits the platforms the opposite way from the 40-byte one — see
+  // src/ffi/strings.ts. These two let the shim own that decoding too: JavaScript registers a flat
+  // function pointer, and installs the matching trampoline's address in `WGPUCallbackInfo.callback`.
+  wgpu_bun_shim_set_callback: { args: [u32, p], returns: i32 },
+  wgpu_bun_shim_trampoline: { args: [u32], returns: p },
 } as const satisfies Record<string, { args: readonly FFIType[]; returns: FFIType }>;
+
+/**
+ * Which callback the shim should trampoline. Must match the `SLOT_*` constants in the crate.
+ *
+ * A numeric selector rather than a string because it crosses a C boundary on every registration, and
+ * a string would mean marshalling a length-prefixed buffer to say "0".
+ */
+export const CALLBACK_SLOTS = {
+  requestAdapter: 0,
+  requestDevice: 1,
+  bufferMap: 2,
+  popErrorScope: 3,
+  queueWorkDone: 4,
+} as const;
+
+/** Name of a wgpu-native callback this seam can install a trampoline for. */
+export type CallbackSlot = keyof typeof CALLBACK_SLOTS;
 
 /**
  * The **eight** `webgpu.h` functions that take a `*CallbackInfo` aggregate by value — the canonical
@@ -351,6 +401,8 @@ export type SeamSymbols = ReturnType<typeof openDirect>["symbols"];
 
 let bound: SeamSymbols | null = null;
 let boundMode: SeamMode | null = null;
+/** Retained after a shim bind so the callback trampolines stay reachable. `null` on the direct path. */
+let shimSymbols: ShimSymbols | null = null;
 
 function openDirect(libPath: string) {
   return dlopen(libPath, DIRECT_SYMBOLS);
@@ -384,8 +436,7 @@ function shimError(s: ShimSymbols): string {
  *      target. The build-time header oracle cannot do this for a platform the developer is not on;
  *      this can.
  */
-function bindShim(shim: IResolvedNativeLibrary, nativePath: string): SeamSymbols {
-  const s = openShimLibrary(shim.path).symbols;
+function bindShim(shim: IResolvedNativeLibrary, nativePath: string, s: ShimSymbols): SeamSymbols {
 
   const abi = Number(s.wgpu_bun_shim_abi_version());
   if (abi !== SHIM_ABI_VERSION) {
@@ -464,7 +515,9 @@ export function seam(): SeamSymbols {
     if (!shim) {
       throw new AbiUnsupportedError(`wgpu-bun: the ABI shim vanished between resolution and binding.\n  ${status.reason}`);
     }
-    bound = bindShim(shim, native.path);
+    const opened = openShimLibrary(shim.path).symbols;
+    bound = bindShim(shim, native.path, opened);
+    shimSymbols = opened;
     boundMode = "shim";
     return bound;
   }
@@ -477,6 +530,54 @@ export function seam(): SeamSymbols {
 /** How the seam was actually bound, or `null` if nothing has called {@link seam} yet. */
 export function seamBoundMode(): SeamMode | null {
   return boundMode;
+}
+
+/** The shim's trampoline services, or `null` when the seam is bound to the direct path. */
+export interface ICallbackTrampolines {
+  /** Register the flat JavaScript function the trampoline for `slot` will forward to. */
+  install(slot: CallbackSlot, flatFunctionPointer: number): void;
+  /** The address to write into `WGPUCallbackInfo.callback` for `slot`. */
+  address(slot: CallbackSlot): number;
+}
+
+/**
+ * How callbacks should be installed on this host.
+ *
+ * `null` means the direct path is bound and the caller must use the **pointer-form** callback
+ * signature, which is correct on Win64 and nowhere else — the seam only ever binds `direct` on
+ * Win64, so that is safe, but it is safe because of the check in {@link seamStatus}, not by luck.
+ *
+ * Anything else means the shim is bound and its C trampolines own the by-value `WGPUStringView`
+ * decoding, so the caller must use the **flat** signature.
+ *
+ * Calling this binds the seam, which is deliberate: the choice of callback shape and the choice of
+ * calling path are the same choice, and letting them be made separately is how they end up
+ * disagreeing.
+ */
+export function callbackTrampolines(): ICallbackTrampolines | null {
+  seam();
+  if (boundMode !== "shim" || !shimSymbols) return null;
+  const s = shimSymbols;
+  return {
+    install(slot, flatFunctionPointer) {
+      const rc = Number(s.wgpu_bun_shim_set_callback(CALLBACK_SLOTS[slot], flatFunctionPointer as Ptr));
+      if (rc !== 0) {
+        throw new AbiUnsupportedError(
+          `wgpu-bun: the ABI shim rejected the ${slot} callback registration (code ${rc}).\n  ${shimError(s)}`,
+        );
+      }
+    },
+    address(slot) {
+      const addr = Number(s.wgpu_bun_shim_trampoline(CALLBACK_SLOTS[slot]));
+      if (!addr) {
+        throw new AbiUnsupportedError(
+          `wgpu-bun: the ABI shim has no trampoline for slot "${slot}" (${CALLBACK_SLOTS[slot]}).\n` +
+            `  The slot table here and the SLOT_* constants in the crate have drifted.`,
+        );
+      }
+      return addr;
+    },
+  };
 }
 
 /** Convenience alias so call sites read as pointers rather than as numbers. */

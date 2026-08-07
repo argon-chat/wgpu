@@ -34,7 +34,7 @@
  */
 
 import { seam } from "../ffi/abiSeam.ts";
-import { callbacks, processEvents, settle, type IHandleResult } from "../ffi/async.ts";
+import { callbackAddress, processEvents, settle, type IHandleResult } from "../ffi/async.ts";
 import { wgpu, type Ptr } from "../ffi/library.ts";
 import { Arena } from "../desc/build.ts";
 import { C, POWER_PREFERENCE, toEnum } from "../enums.ts";
@@ -156,7 +156,7 @@ export class GPU {
 
     const info = arena.struct("WGPURequestAdapterCallbackInfo");
     info.setEnum("mode", C.callbackMode.allowProcessEvents);
-    info.setPtr("callback", Number(callbacks.requestAdapter.ptr));
+    info.setPtr("callback", callbackAddress("requestAdapter"));
     const infoPtr = arena.hold(info);
 
     const result = await settle<IHandleResult>(

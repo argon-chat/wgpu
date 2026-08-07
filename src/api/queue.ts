@@ -41,7 +41,7 @@
 import { ptr as bunPtr } from "bun:ffi";
 
 import { seam } from "../ffi/abiSeam.ts";
-import { callbacks, devicePoll, processEvents, settle, type IStatusResult } from "../ffi/async.ts";
+import { callbackAddress, devicePoll, processEvents, settle, type IStatusResult } from "../ffi/async.ts";
 import { wgpu } from "../ffi/library.ts";
 import type { Ptr } from "../ffi/pointer.ts";
 import { Arena } from "../desc/build.ts";
@@ -155,7 +155,7 @@ export class GPUQueue {
     const arena = new Arena();
     const info = arena.struct("WGPUQueueWorkDoneCallbackInfo");
     info.setEnum("mode", C.callbackMode.allowProcessEvents);
-    info.setPtr("callback", callbacks.queueWorkDone.ptr);
+    info.setPtr("callback", callbackAddress("queueWorkDone"));
     const infoPtr = arena.hold(info);
 
     const result = await settle<IStatusResult>(

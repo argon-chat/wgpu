@@ -103,12 +103,13 @@ jobs:
             # lavapipe is a real, installable adapter here. No excuse is granted: if it does not
             # come up, that is a finding and the leg should go red.
             #
-            # This is also the ONE leg whose ABI needs the compiled shim, and it is the leg that
-            # previously reported `no-adapter` — which was false. `vulkaninfo` on this runner shows
-            # `llvmpipe (LLVM 20.1.2) / DRIVER_ID_MESA_LLVMPIPE`: the adapter was there the whole
-            # time, and what actually happened was the seam refusing an ABI it could not express.
-            # The gate now separates those two facts (`abi-unsupported`), and the shim build step
-            # below is what makes the refusal unreachable rather than merely well-labelled.
+            # This leg has reported `no-adapter` twice for two different wrong reasons, and both
+            # were the gate's fault rather than the runner's. `vulkaninfo` here shows
+            # `llvmpipe (LLVM 20.1.2) / DRIVER_ID_MESA_LLVMPIPE`: the adapter has been present all
+            # along. First it was the seam refusing an ABI it could not express (now
+            # `abi-unsupported`); then it was a callback whose by-value `WGPUStringView` was decoded
+            # under the Win64 rule, so the correlation ticket arrived as garbage and the operation
+            # never completed (now `no-callback`, and never a permitted skip).
             allow_no_adapter: "0"
           - rid: linux-arm64
             runner: ubuntu-24.04-arm # free for public repositories; unavailable in private ones
@@ -150,10 +151,13 @@ jobs:
         # It lands in `vendor/<rid>/lib/`, the same tier the fetched wgpu-native uses, so the seam
         # picks it up with no configuration.
         #
-        # Built on EVERY leg, not only on linux-x64 where the ABI requires it. That is the point of
-        # the decision recorded in shim.manifest.ts: the code that will run on the platform nobody
-        # can debug interactively is the same code every other leg just executed against a real
-        # device. A SysV-only shim would have its first and only run on its hardest platform.
+        # Required on THREE of the four legs, not one: `win32-x64` is the only platform where a
+        # pointer is a correct stand-in for BOTH by-value aggregates that cross this boundary (the
+        # 40-byte argument and the 16-byte callback `message`). See shim.manifest.ts.
+        #
+        # Built on all four anyway, including the one that does not need it — because that one is
+        # the only platform a maintainer can execute interactively, and a calling path that is never
+        # run locally is a calling path whose first real execution is here.
         run: bun run shim:build
 
       - name: Upload the shim artefact
@@ -241,6 +245,12 @@ jobs:
               unimplemented)
                 unimplemented=$((unimplemented+1))
                 echo "| \`$plat\` | n/a (binding unimplemented) | — | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+              no-callback)
+                # NOT a statement about the GPU either: the adapter was reached far enough to be
+                # asked, and it never answered. Either the device is not completing, or the binding
+                # mis-decoded its own callback arguments. Never a permitted skip — the leg is
+                # already red by the time this renders, and this row says why.
+                echo "| \`$plat\` | **FAILED** (callback never arrived) | ${seam:-?} | ${adapter:-?} |" >> "$GITHUB_STEP_SUMMARY" ;;
               abi-unsupported)
                 # NOT a statement about the GPU. The binding declined an ABI it cannot express
                 # without the compiled shim; the adapter was never asked for. Rendered distinctly

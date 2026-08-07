@@ -83,9 +83,12 @@
 
 import { FFIType, JSCallback } from "bun:ffi";
 
-import { readStringView } from "./strings.ts";
+import { callbackTrampolines, seamBoundMode as boundMode, seamStatus, type CallbackSlot } from "./abiSeam.ts";
+import { decodeStringParts, readStringView } from "./strings.ts";
 import { wgpu } from "./library.ts";
 import { asAddress, type Ptr } from "./pointer.ts";
+
+export type { CallbackSlot } from "./abiSeam.ts";
 
 /** A correlation token. Opaque to callers; meaningful only to this module. */
 export type Ticket = number;
@@ -139,70 +142,178 @@ export interface IHandleResult extends IStatusResult { handle: Ptr }
 export interface IErrorScopeResult extends IStatusResult { errorType: number }
 
 const { ptr, u32, u64, void: v } = FFIType;
-const CB_ARGS_HANDLE = [u32, ptr, ptr, u64, u64] as const; // status, handle, StringView*, ud1, ud2
-const CB_ARGS_STATUS = [u32, ptr, u64, u64] as const; //       status, StringView*, ud1, ud2
 
 /**
- * One long-lived `JSCallback` per C callback signature.
+ * ══ Two callback shapes, because `WGPUStringView message` is passed BY VALUE ══
  *
- * Created lazily and never closed: they live exactly as long as the process, which is the only
- * lifetime that is definitely longer than any in-flight native operation. Closing one while
- * wgpu-native still holds the pointer would be a use-after-free in the other direction.
+ * Every wgpu-native callback receives `message` as a 16-byte `{char const*, size_t}` **by value**,
+ * and the ABIs disagree about what that means in a way that does **not** match the split for the
+ * 40-byte `*CallbackInfo` argument:
+ *
+ * | | Win64 | AArch64 AAPCS | SysV x86-64 |
+ * |---|---|---|---|
+ * | 40-byte aggregate | hidden reference | indirect (>16 B) | **stack** |
+ * | **16-byte aggregate** | **hidden reference** | **two registers** | **two registers** |
+ *
+ * For the 40-byte case SysV is the outlier. For the 16-byte case **Win64 is the outlier and the
+ * other three agree.** Declaring `message` as a single pointer — the {@link POINTER_FORM} below — is
+ * therefore correct on Windows and wrong on `linux-x64`, `linux-arm64` and `darwin-arm64` alike,
+ * where the callee reads `ud1` out of the register holding `message.length`.
+ *
+ * The consequence is not a crash. The ticket comes back as garbage, {@link dispatch} does the right
+ * thing with an unknown ticket — ignores it, because a late callback is normal — and the promise
+ * simply never settles. It presents as a hang inside `requestAdapter` on three platforms at once,
+ * with nothing anywhere reporting an ABI problem. That is exactly what happened, and it survived
+ * every local run because the one platform available locally was the one it was right on.
+ *
+ * So the shape is not chosen by reasoning any more. It is chosen by *who is decoding the aggregate*:
+ *
+ *   - **{@link FLAT_FORM}** — `(…, msgData, msgLen, ud1, ud2)`. Used whenever the shim is bound. The
+ *     shim's C trampolines take the aggregate with its real prototype and split it, so the compiler
+ *     on the target applies the target's rules and this side only ever sees primitives.
+ *   - **{@link POINTER_FORM}** — `(…, StringView*, ud1, ud2)`. Used only on the direct path, which
+ *     `src/ffi/abiSeam.ts` now binds on **Win64 only** for precisely this reason.
  */
-class Callbacks {
-  #requestAdapter?: JSCallback;
-  #requestDevice?: JSCallback;
-  #bufferMap?: JSCallback;
-  #popErrorScope?: JSCallback;
-  #workDone?: JSCallback;
 
-  /** `(status, adapter, message, ud1, ud2)` */
-  get requestAdapter(): JSCallback {
-    return (this.#requestAdapter ??= new JSCallback(
+/** Flat: `(status, handle, msgData, msgLen, ud1, ud2)` — correct on every ABI, via the shim. */
+const FLAT_ARGS_HANDLE = [u32, ptr, ptr, u64, u64, u64] as const;
+/** Flat: `(status, msgData, msgLen, ud1, ud2)`. */
+const FLAT_ARGS_STATUS = [u32, ptr, u64, u64, u64] as const;
+/** Flat: `(status, errorType, msgData, msgLen, ud1, ud2)`. */
+const FLAT_ARGS_ERROR_SCOPE = [u32, u32, ptr, u64, u64, u64] as const;
+
+/** Pointer form: `(status, handle, StringView*, ud1, ud2)` — Win64 only. */
+const PTR_ARGS_HANDLE = [u32, ptr, ptr, u64, u64] as const;
+/** Pointer form: `(status, StringView*, ud1, ud2)` — Win64 only. */
+const PTR_ARGS_STATUS = [u32, ptr, u64, u64] as const;
+/** Pointer form: `(status, errorType, StringView*, ud1, ud2)` — Win64 only. */
+const PTR_ARGS_ERROR_SCOPE = [u32, u32, ptr, u64, u64] as const;
+
+/**
+ * The flat callbacks, matching the shim's trampoline prototypes.
+ *
+ * Built lazily and never closed: they live exactly as long as the process, which is the only
+ * lifetime definitely longer than any in-flight native operation. Closing one while wgpu-native
+ * still holds the pointer would be a use-after-free in the other direction.
+ */
+const FLAT_FORM: Record<CallbackSlot, () => JSCallback> = {
+  requestAdapter: () =>
+    new JSCallback(
+      (status: number, handle: number, data: number, len: bigint, ud1: bigint) =>
+        dispatch<IHandleResult>(Number(ud1), {
+          status,
+          handle: asAddress(handle ?? 0),
+          message: decodeStringParts(data, len),
+        }),
+      { args: FLAT_ARGS_HANDLE, returns: v },
+    ),
+  requestDevice: () =>
+    new JSCallback(
+      (status: number, handle: number, data: number, len: bigint, ud1: bigint) =>
+        dispatch<IHandleResult>(Number(ud1), {
+          status,
+          handle: asAddress(handle ?? 0),
+          message: decodeStringParts(data, len),
+        }),
+      { args: FLAT_ARGS_HANDLE, returns: v },
+    ),
+  bufferMap: () =>
+    new JSCallback(
+      (status: number, data: number, len: bigint, ud1: bigint) =>
+        dispatch<IStatusResult>(Number(ud1), { status, message: decodeStringParts(data, len) }),
+      { args: FLAT_ARGS_STATUS, returns: v },
+    ),
+  popErrorScope: () =>
+    new JSCallback(
+      (status: number, errorType: number, data: number, len: bigint, ud1: bigint) =>
+        dispatch<IErrorScopeResult>(Number(ud1), {
+          status,
+          errorType,
+          message: decodeStringParts(data, len),
+        }),
+      { args: FLAT_ARGS_ERROR_SCOPE, returns: v },
+    ),
+  queueWorkDone: () =>
+    new JSCallback(
+      (status: number, data: number, len: bigint, ud1: bigint) =>
+        dispatch<IStatusResult>(Number(ud1), { status, message: decodeStringParts(data, len) }),
+      { args: FLAT_ARGS_STATUS, returns: v },
+    ),
+};
+
+/** The pointer-form callbacks. Correct on Win64, which is the only place the seam binds `direct`. */
+const POINTER_FORM: Record<CallbackSlot, () => JSCallback> = {
+  requestAdapter: () =>
+    new JSCallback(
       (status: number, handle: number, message: number, ud1: bigint) =>
-        dispatch<IHandleResult>(Number(ud1), { status, handle: asAddress(handle ?? 0), message: readStringView(message) }),
-      { args: CB_ARGS_HANDLE, returns: v },
-    ));
-  }
-
-  /** `(status, device, message, ud1, ud2)` */
-  get requestDevice(): JSCallback {
-    return (this.#requestDevice ??= new JSCallback(
+        dispatch<IHandleResult>(Number(ud1), {
+          status,
+          handle: asAddress(handle ?? 0),
+          message: readStringView(message),
+        }),
+      { args: PTR_ARGS_HANDLE, returns: v },
+    ),
+  requestDevice: () =>
+    new JSCallback(
       (status: number, handle: number, message: number, ud1: bigint) =>
-        dispatch<IHandleResult>(Number(ud1), { status, handle: asAddress(handle ?? 0), message: readStringView(message) }),
-      { args: CB_ARGS_HANDLE, returns: v },
-    ));
-  }
-
-  /** `(status, message, ud1, ud2)` */
-  get bufferMap(): JSCallback {
-    return (this.#bufferMap ??= new JSCallback(
+        dispatch<IHandleResult>(Number(ud1), {
+          status,
+          handle: asAddress(handle ?? 0),
+          message: readStringView(message),
+        }),
+      { args: PTR_ARGS_HANDLE, returns: v },
+    ),
+  bufferMap: () =>
+    new JSCallback(
       (status: number, message: number, ud1: bigint) =>
         dispatch<IStatusResult>(Number(ud1), { status, message: readStringView(message) }),
-      { args: CB_ARGS_STATUS, returns: v },
-    ));
-  }
-
-  /** `(status, errorType, message, ud1, ud2)` */
-  get popErrorScope(): JSCallback {
-    return (this.#popErrorScope ??= new JSCallback(
+      { args: PTR_ARGS_STATUS, returns: v },
+    ),
+  popErrorScope: () =>
+    new JSCallback(
       (status: number, errorType: number, message: number, ud1: bigint) =>
         dispatch<IErrorScopeResult>(Number(ud1), { status, errorType, message: readStringView(message) }),
-      { args: [u32, u32, ptr, u64, u64], returns: v },
-    ));
-  }
-
-  /** `(status, message, ud1, ud2)` */
-  get queueWorkDone(): JSCallback {
-    return (this.#workDone ??= new JSCallback(
+      { args: PTR_ARGS_ERROR_SCOPE, returns: v },
+    ),
+  queueWorkDone: () =>
+    new JSCallback(
       (status: number, message: number, ud1: bigint) =>
         dispatch<IStatusResult>(Number(ud1), { status, message: readStringView(message) }),
-      { args: CB_ARGS_STATUS, returns: v },
-    ));
-  }
-}
+      { args: PTR_ARGS_STATUS, returns: v },
+    ),
+};
 
-export const callbacks = new Callbacks();
+/** Kept alive for the process. The map is the only reference; nothing ever removes an entry. */
+const liveCallbacks = new Map<CallbackSlot, JSCallback>();
+const installedAddress = new Map<CallbackSlot, number>();
+
+/**
+ * The address to write into `WGPUCallbackInfo.callback` for a given operation.
+ *
+ * Single entry point on purpose. Choosing the callback *shape* and choosing the calling *path* are
+ * the same decision, and the previous arrangement — a `callbacks.requestAdapter` property that knew
+ * nothing about the seam — is what allowed one shape to be used on four ABIs.
+ */
+export function callbackAddress(slot: CallbackSlot): number {
+  const cached = installedAddress.get(slot);
+  if (cached !== undefined) return cached;
+
+  const trampolines = callbackTrampolines();
+  const jsCallback = (trampolines ? FLAT_FORM : POINTER_FORM)[slot]();
+  liveCallbacks.set(slot, jsCallback);
+
+  let address: number;
+  if (trampolines) {
+    // wgpu-native calls the shim's C trampoline; the trampoline calls this flat JS function. The
+    // by-value aggregate is decoded in between, by a compiler that knows the target.
+    trampolines.install(slot, Number(jsCallback.ptr));
+    address = trampolines.address(slot);
+  } else {
+    address = Number(jsCallback.ptr);
+  }
+  installedAddress.set(slot, address);
+  return address;
+}
 
 // ── the pump ─────────────────────────────────────────────────────────────────────────────────
 
@@ -259,6 +370,27 @@ function yieldTurn(spin: number): Promise<void> {
  */
 const SETTLE_DEADLINE_MS = 30_000;
 
+/**
+ * A native operation was issued and its callback never arrived.
+ *
+ * Its own class, for the same reason `AbiUnsupportedError` is: **"the callback never came" and "this
+ * machine has no GPU" are different facts**, and the test gate previously filed this one under
+ * `no-adapter`. That was wrong twice over. It named the wrong subsystem — the adapter was present
+ * and enumerable on every runner that hit it — and `no-adapter` is *escapable* by an environment
+ * variable two CI legs are granted, so a genuine completion defect could be skipped past in silence
+ * on the legs most likely to have it.
+ *
+ * The defect this class was created for turned out to be an ABI one after all: the callback's
+ * by-value `WGPUStringView` parameter was declared as a pointer, correct on Win64 and wrong on the
+ * other three platforms, so the correlation ticket arrived as garbage and {@link dispatch} correctly
+ * ignored it. But the *category* is worth keeping separate regardless of that particular cause — a
+ * driver that genuinely never answers produces the identical symptom, and the gate should not have
+ * to guess which it is looking at.
+ */
+export class CallbackDeadlineError extends Error {
+  override readonly name = "CallbackDeadlineError";
+}
+
 export async function settle<T>(pump: () => void, begin: (ticket: Ticket) => void): Promise<T> {
   let done = false;
   let result!: T;
@@ -277,15 +409,25 @@ export async function settle<T>(pump: () => void, begin: (ticket: Ticket) => voi
     await yieldTurn(spin);
     if (!done && performance.now() - startedAt > SETTLE_DEADLINE_MS) {
       disarm(ticket);
-      throw new Error(
+      const status = seamStatus();
+      throw new CallbackDeadlineError(
         `wgpu-bun: a native asynchronous call did not complete within ${SETTLE_DEADLINE_MS} ms ` +
           `(${spin + 1} pump turns on ${process.platform}-${process.arch}).\n` +
-          `  The operation was issued and its callback never fired. wgpu-native delivers only on\n` +
-          `  poll, so this is either a driver/adapter that never answers, or a call whose argument\n` +
-          `  passing is wrong for this ABI. The second should now be unreachable — src/ffi/abiSeam.ts\n` +
-          `  refuses outright rather than issuing a call it cannot express — so if it IS the cause,\n` +
-          `  the seam bound a path it should not have. Check seamStatus() and seamBoundMode() before\n` +
-          `  looking at the driver.`,
+          `  The operation was issued and its callback never fired.\n\n` +
+          `  seam: requested=${process.env["WGPU_BUN_SEAM"] ?? "auto"} resolved=${status.mode} ` +
+          `bound=${boundMode() ?? "(not bound)"}\n` +
+          `  shim: ${status.shim ? `${status.shim.path} (${status.shim.version ?? "unstamped"}, via ${status.shim.source})` : "none installed"}\n` +
+          `  ${status.reason}\n\n` +
+          `  Two causes produce this exactly alike, so the line above is printed rather than left to\n` +
+          `  be inferred:\n` +
+          `    1. A driver or adapter that never answers. wgpu-native delivers only on poll, and a\n` +
+          `       device that never completes looks identical to slow work.\n` +
+          `    2. A callback whose ARGUMENTS are mis-decoded, so the correlation ticket arrives as\n` +
+          `       garbage and the delivery is silently ignored as an unknown ticket. This is what a\n` +
+          `       by-value WGPUStringView passed under the wrong ABI rule looks like, and it is why\n` +
+          `       the callback shape is chosen by which seam path is bound (src/ffi/async.ts) rather\n` +
+          `       than assumed. If \`bound\` above is \`direct\` on anything other than win32-x64, that\n` +
+          `       is the cause and it is a bug in the seam, not in the driver.`,
       );
     }
   }

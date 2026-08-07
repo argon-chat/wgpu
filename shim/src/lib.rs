@@ -1,19 +1,32 @@
 /*!
 # wgpu-bun-shim — the compiled half of the ABI seam
 
-`bun:ffi` has no struct-by-value argument type. Seven wgpu-native entry points take a C aggregate
-**by value**, and on the SysV x86-64 ABI (Linux x64, Intel macOS) such an aggregate is either copied
-onto the stack (>16 bytes → class MEMORY) or passed in two registers (a 16-byte aggregate of two
-integer-class members). Neither can be produced from JavaScript by any combination of `FFIType`
-arguments. On Win64 and AArch64 the same aggregates are passed by hidden reference, so a pointer *is*
-the correct calling sequence there — which is why the JS-only path works on those platforms and
-cannot be made to work on SysV.
+`bun:ffi` has no struct-by-value argument type, and wgpu-native passes aggregates by value in **both
+directions**: seven entry points take one as an argument, and every callback receives its `message`
+as a 16-byte `WGPUStringView` by value.
 
-This crate closes that hole in the only way that is actually correct: it declares the aggregates as
-real `#[repr(C)]` structs and lets a real compiler emit the calling sequence. Every exported wrapper
-takes a **pointer** to an already-packed buffer and dereferences it on this side, so the signature
-facing JavaScript is flat and identical to the one the JS-only path already uses. Adopting the shim
-is a change of which library gets opened, and nothing else.
+Those two sizes group the platforms differently, which is the trap this crate exists to remove:
+
+| aggregate | Win64 | AArch64 AAPCS | SysV x86-64 |
+|---|---|---|---|
+| 40 B (`*CallbackInfo`, an argument) | hidden reference | indirect (>16 B) | **stack (MEMORY)** |
+| 16 B (`WGPUStringView`, a callback parameter) | hidden reference (∉ {1,2,4,8}) | **two registers** | **two registers** |
+
+For the first row SysV is the odd one out; for the second, **Win64 is**. Reading only the first row
+and concluding "Win64 and AArch64 are fine" is exactly the mistake that shipped: a callback declaring
+`message` as a single pointer works on Windows and silently misreads `userdata1` out of the register
+holding `message.length` on `linux-x64`, `linux-arm64` and `darwin-arm64` alike. The correlation
+ticket comes back as garbage, the binding correctly ignores an unknown ticket, and the operation
+simply never completes — a hang, on three platforms at once, with no ABI error anywhere.
+
+This crate closes both holes the same way: declare the aggregates as real `#[repr(C)]` structs and
+let a real compiler emit the sequence for the target it is compiling for.
+
+* **Going in** — each exported wrapper takes a **pointer** to an already-packed buffer and
+  dereferences it here, so the signature facing JavaScript is the one it was already using.
+* **Coming back** — five C trampolines carry the real callback prototypes, take the by-value
+  `WGPUStringView`, and forward `(data, length)` to a flat JavaScript function pointer registered
+  through `wgpu_bun_shim_set_callback`.
 
 ## Why it resolves wgpu-native at runtime instead of linking it
 
@@ -44,6 +57,7 @@ JavaScript could not express.
 #![allow(dead_code)]
 
 use std::ffi::{c_char, c_void};
+use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -55,7 +69,7 @@ use std::sync::{Mutex, OnceLock};
 /// Bumped whenever an exported signature changes shape. `src/ffi/abiSeam.ts` refuses to bind a shim
 /// that reports a different number, because the failure mode of a silently mismatched signature is a
 /// corrupted stack, not an error.
-const SHIM_ABI_VERSION: u32 = 1;
+const SHIM_ABI_VERSION: u32 = 2;
 
 /// The wgpu-native generation whose struct definitions are transcribed below.
 ///
@@ -592,6 +606,203 @@ pub unsafe extern "C" fn wgpu_bun_shim_supported_features_free_members(features:
     }
     let value = unsafe { std::ptr::read_unaligned(features as *const WGPUSupportedFeatures) };
     unsafe { (t.supported_features_free_members)(value) }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+// Callback trampolines — the *other* direction, and the one that actually bit
+// ────────────────────────────────────────────────────────────────────────────────────────────────
+//
+// Everything above is about arguments this crate passes INTO wgpu-native. This section is about the
+// argument wgpu-native passes back OUT, and it is a separate ABI problem that hides behind the same
+// words.
+//
+// Every wgpu-native callback takes its `message` as a `WGPUStringView` **by value** — 16 bytes,
+// two integer-class members. The classification rules for that size are not the same as for the
+// 40-byte callback-info aggregate, and crucially they split the platforms differently:
+//
+// | aggregate                    | Win64        | AArch64 AAPCS  | SysV x86-64    |
+// |------------------------------|--------------|----------------|----------------|
+// | 40 B (`*CallbackInfo`)       | hidden ref   | indirect (>16) | stack (MEMORY) |
+// | **16 B (`WGPUStringView`)**  | **hidden ref** (size ∉ {1,2,4,8}) | **two registers** (≤16 B) | **two registers** |
+//
+// So for the 40-byte case Windows and AArch64 agree and SysV is the outlier; for the 16-byte case
+// **Windows is the outlier and the other three agree**. A binding that declares the callback's
+// `message` parameter as a single pointer is therefore correct on Win64 and wrong on all three of
+// linux-x64, linux-arm64 and darwin-arm64 — where the callee reads `userdata1` out of the register
+// holding `message.length`, gets a garbage correlation ticket, and the operation never completes.
+//
+// That failure is silent by construction: an unknown ticket is *deliberately* ignored (a callback
+// arriving after teardown is normal), so the callback runs, matches nothing, and the promise simply
+// never settles. It presents as a hang in `requestAdapter`, on three platforms at once, with no ABI
+// error anywhere — which is precisely why it read as "not an ABI problem".
+//
+// The fix is the same mechanism as above, pointed the other way: declare the real prototype here,
+// let the compiler decode the aggregate, and hand JavaScript a **flat** parameter list it can
+// express on every ABI. JavaScript registers a flat function pointer; this crate installs the
+// matching trampoline's address in `WGPUCallbackInfo.callback`.
+
+/// `(status, handle, msg_data, msg_len, userdata1, userdata2)`
+type FlatHandleCb = unsafe extern "C" fn(u32, *mut c_void, *const c_char, u64, u64, u64);
+/// `(status, msg_data, msg_len, userdata1, userdata2)`
+type FlatStatusCb = unsafe extern "C" fn(u32, *const c_char, u64, u64, u64);
+/// `(status, error_type, msg_data, msg_len, userdata1, userdata2)`
+type FlatErrorScopeCb = unsafe extern "C" fn(u32, u32, *const c_char, u64, u64, u64);
+
+/// Callback slots, indexed by the selector JavaScript passes.
+///
+/// Selectors: 0 requestAdapter · 1 requestDevice · 2 bufferMap · 3 popErrorScope · 4 queueWorkDone.
+const SLOT_COUNT: usize = 5;
+const SLOT_REQUEST_ADAPTER: u32 = 0;
+const SLOT_REQUEST_DEVICE: u32 = 1;
+const SLOT_BUFFER_MAP: u32 = 2;
+const SLOT_POP_ERROR_SCOPE: u32 = 3;
+const SLOT_QUEUE_WORK_DONE: u32 = 4;
+
+/// `AtomicPtr` rather than a `Mutex`: a trampoline runs inside wgpu-native's own call stack, often
+/// re-entrantly, and taking a lock there is how a deadlock gets built. A relaxed load of a pointer
+/// that is written once at startup is all this needs.
+static FLAT: [AtomicPtr<c_void>; SLOT_COUNT] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
+];
+
+#[inline]
+fn flat_slot(slot: u32) -> *mut c_void {
+    FLAT.get(slot as usize)
+        .map_or(std::ptr::null_mut(), |s| s.load(Ordering::Acquire))
+}
+
+/// Split a by-value `WGPUStringView` into the flat pair JavaScript receives.
+///
+/// `WGPU_STRLEN` (`SIZE_MAX`, "NUL-terminated, measure it") is passed through untouched rather than
+/// resolved here: measuring it means walking memory, and the decision about how to treat a sentinel
+/// belongs with the decoder that already handles the NULL-data case.
+#[inline]
+fn split(view: WGPUStringView) -> (*const c_char, u64) {
+    (view.data, view.length as u64)
+}
+
+unsafe extern "C" fn tramp_request_adapter(
+    status: u32,
+    adapter: *mut c_void,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_REQUEST_ADAPTER);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    // SAFETY: the slot holds a pointer JavaScript registered for exactly this signature.
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatHandleCb>(f) };
+    unsafe { f(status, adapter, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+unsafe extern "C" fn tramp_request_device(
+    status: u32,
+    device: *mut c_void,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_REQUEST_DEVICE);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatHandleCb>(f) };
+    unsafe { f(status, device, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+unsafe extern "C" fn tramp_buffer_map(
+    status: u32,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_BUFFER_MAP);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatStatusCb>(f) };
+    unsafe { f(status, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+unsafe extern "C" fn tramp_pop_error_scope(
+    status: u32,
+    error_type: u32,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_POP_ERROR_SCOPE);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatErrorScopeCb>(f) };
+    unsafe { f(status, error_type, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+unsafe extern "C" fn tramp_queue_work_done(
+    status: u32,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_QUEUE_WORK_DONE);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatStatusCb>(f) };
+    unsafe { f(status, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+/// Register the flat JavaScript callback for `slot`.
+///
+/// Returns `0` on success, `-1` for an unknown slot, `-2` for a null function pointer. Registering
+/// twice is allowed and replaces — the binding creates these once per process, but a caller that
+/// re-registered the same pointer should not be punished for it.
+#[no_mangle]
+pub unsafe extern "C" fn wgpu_bun_shim_set_callback(slot: u32, f: *mut c_void) -> i32 {
+    if f.is_null() {
+        set_error("wgpu_bun_shim_set_callback was passed a null function pointer");
+        return -2;
+    }
+    match FLAT.get(slot as usize) {
+        Some(cell) => {
+            cell.store(f, Ordering::Release);
+            0
+        }
+        None => {
+            set_error(format!("wgpu_bun_shim_set_callback: unknown slot {slot}"));
+            -1
+        }
+    }
+}
+
+/// The address to write into `WGPUCallbackInfo.callback` for `slot`, or NULL for an unknown slot.
+///
+/// This is the whole point of the section: what wgpu-native receives is a C function compiled with
+/// the real prototype, so the by-value `WGPUStringView` is decoded by a compiler that knows the
+/// target's rules rather than by a signature someone derived for one platform and assumed for four.
+#[no_mangle]
+pub extern "C" fn wgpu_bun_shim_trampoline(slot: u32) -> *mut c_void {
+    let f: *const () = match slot {
+        SLOT_REQUEST_ADAPTER => tramp_request_adapter as *const (),
+        SLOT_REQUEST_DEVICE => tramp_request_device as *const (),
+        SLOT_BUFFER_MAP => tramp_buffer_map as *const (),
+        SLOT_POP_ERROR_SCOPE => tramp_pop_error_scope as *const (),
+        SLOT_QUEUE_WORK_DONE => tramp_queue_work_done as *const (),
+        _ => return std::ptr::null_mut(),
+    };
+    f as *mut c_void
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────

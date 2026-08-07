@@ -16,11 +16,14 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 > surfaces, render bundles, indirect draw, occlusion queries, external textures.
 >
 > **Proven by execution: `win32-x64` only**, against wgpu-native `v29.0.1.1` on a discrete NVIDIA
-> adapter over D3D12 — the full suite, and both of the two calling paths described under
-> [The ABI seam](#the-abi-seam). **`linux-x64`, `linux-arm64` and `darwin-arm64` are correct by rule
-> and unmeasured**: they compile, they typecheck, the struct layouts are invariant across all four by
-> an argument set out in `src/layouts/index.ts` — and no line of this package has ever run on them.
-> [What is proven and what is argued](#what-is-proven-and-what-is-argued) says exactly which is which.
+> adapter over D3D12 and on the WARP software adapter in CI — the full suite, and both of the two
+> calling paths described under [The ABI seam](#the-abi-seam).
+>
+> **`linux-x64`, `linux-arm64` and `darwin-arm64` compile and typecheck; the binding does not yet
+> pass there.** The first CI matrix run found a real defect on all three at once — a by-value
+> `WGPUStringView` callback parameter decoded under the Win64 rule — and it is fixed but not yet
+> re-measured. [What is proven and what is argued](#what-is-proven-and-what-is-argued) says exactly
+> which claims rest on execution and which on a specification.
 >
 > **Not published, and not ready to be.** `private: true` is still set. See
 > [Remaining gaps](#remaining-gaps).
@@ -40,9 +43,9 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 | Error scopes, nested, with negative tests proving they report | ✅ |
 | `getCompilationInfo()`, synthesised from the creation-time validation error | ✅ |
 | Explicit, documented backend selection (D3D12 / Vulkan / Metal) | ✅ |
-| The by-value ABI hole, closed by a compiled shim — every platform, one code path | ✅ |
+| The by-value ABI holes — both directions — closed by a compiled shim | ✅ |
 | Prebuilt shim artefacts published and pinned by sha256 | ⏳ not yet released |
-| Execution on anything other than `win32-x64` | ⏳ never run |
+| A green test run on anything other than `win32-x64` | ⏳ not yet |
 | Surfaces, render bundles, indirect draw, occlusion queries, external textures | ❌ out of scope |
 
 ## Why this exists
@@ -198,25 +201,40 @@ Everything else is fine. All 115 descriptor structs — including the 168-byte
 `WGPURenderPipelineDescriptor` with its nested vertex state — are passed **by pointer**. Descriptors
 are not the problem. The whole hazard is seven functions of 207.
 
-Whether a pointer can stand in for the aggregate is a property of the ABI, and it is not uniform:
+Aggregates also come back **out**: every wgpu-native callback receives its `message` as a 16-byte
+`WGPUStringView` by value. That is the same phrase, a different size, and — critically — a different
+rule.
 
-| ABI | A 40-byte aggregate argument | Pointer substitution |
-|---|---|---|
-| **Win64** | size ∉ {1,2,4,8} → by hidden reference | correct — verified by execution |
-| **AArch64 AAPCS** | size > 16 → indirect, address in a register | correct by rule |
-| **SysV x86-64** | size > 16 → class MEMORY → copied onto the stack | **wrong** |
+| aggregate | Win64 | AArch64 AAPCS | SysV x86-64 |
+|---|---|---|---|
+| **40 B** `*CallbackInfo`, an argument | hidden reference | indirect (>16 B) | **stack (MEMORY)** |
+| **16 B** `WGPUStringView`, a callback parameter | hidden reference (∉ {1,2,4,8}) | **two registers** | **two registers** |
 
-There is a second, subtler SysV case that no size check would catch: a 16-byte aggregate of two
-integer-class members (`WGPUSupportedFeatures`, every `WGPUStringView`) is passed in **two
-registers**, so a pointer is wrong there too, differently.
+**The two rows group the platforms differently, and that is the whole trap.** Row one makes SysV the
+outlier. Row two makes **Win64** the outlier.
+
+An earlier revision of this package read row one, concluded Win64 and AArch64 were both safe, and
+declared the callback's `message` as a single pointer. Correct on Windows; wrong on `linux-x64`,
+`linux-arm64` and `darwin-arm64` alike, where the callee reads the correlation ticket out of the
+register holding `message.length`. The symptom was not a crash and not an ABI error: the ticket came
+back as garbage, an unknown ticket is *deliberately* ignored (a late callback is normal), and the
+promise simply never settled — a hang inside `requestAdapter` on three platforms simultaneously. It
+survived every local run because the one platform available locally was the one it was right on.
+
+Both directions are now bought from a compiler rather than reasoned about.
 
 ### How it is closed
 
 `shim/` is a small Rust `cdylib` — no dependencies — that declares those aggregates as real
-`#[repr(C)]` structs, lets a real compiler emit the calling sequence, and re-exports the seven
-functions with flat pointer parameters. Since every call site already hands over a pointer to an
-already-packed buffer, **the shim's signature is the signature the binding was already using**;
-adopting it changed which library gets opened and nothing else.
+`#[repr(C)]` structs and lets a real compiler emit the sequence for whatever it is compiling for.
+It gives JavaScript a flat surface in both directions:
+
+- **Going in** — the seven entry points re-exported with flat pointer parameters. Since every call
+  site already hands over a pointer to an already-packed buffer, **the shim's signature is the
+  signature the binding was already using**.
+- **Coming back** — five C trampolines carrying the real callback prototypes. They take the
+  by-value `WGPUStringView`, split it, and forward `(data, length)` to a flat JavaScript function.
+  What goes into `WGPUCallbackInfo.callback` is the trampoline's address, not a `bun:ffi` callback's.
 
 It resolves wgpu-native at runtime, by the exact absolute path the binding resolved, rather than
 linking it. That is not laziness: linking would risk a *second* wgpu-native instance in the process
@@ -236,32 +254,33 @@ Three checks run before the shim is trusted, and each corresponds to a way the p
   of the same C types, cross-checked at runtime on the real target — which is the one thing the
   build-time header oracle cannot do for a platform the author is not sitting on.
 
-### Every platform, not only the one that needs it
+### Required on three platforms of four, built on all four
 
-Only `linux-x64` *needs* the shim among the four supported platforms. Building it for SysV alone
-would be one target instead of four, and it would leave today's proven Windows behaviour untouched.
-It is built everywhere anyway, and the reason is **where the code gets exercised**.
+Because the direct path has to satisfy **both** rows of the table above, it is correct on
+`win32-x64` and nowhere else. `linux-x64`, `linux-arm64` and `darwin-arm64` all require the shim.
+(An earlier revision of this section said "only `linux-x64` needs it". That was the same mistake in
+prose form, and it is what a CI matrix cost to find.)
 
-A SysV-only shim would run on exactly one platform: the one that cannot be debugged interactively
-from the machine this package is developed on. Its first real execution would be in CI, on the
-platform where a mis-transcribed struct member is most expensive to diagnose — and its failure mode
-there is not a crash but a callback that never fires. Built for every platform, the same code runs
-on every local test invocation against a real GPU, and what ships to SysV has been executed
-thousands of times before it gets there.
+It is built for all four anyway, including the one that does not need it, and the reason is **where
+the code gets exercised**. `win32-x64` is the only platform a maintainer can run interactively,
+attach a debugger to, or bisect on. A shim absent there would mean the calling path that ships to
+everyone else is one that has never executed on a machine anybody was watching — which is precisely
+the shape of the defect above. Built everywhere, the same trampolines run on every local test.
 
-The cost is a four-target build matrix instead of one, paid by runners the test matrix already uses.
+The cost is a four-target build matrix instead of three, paid by runners the test matrix already
+uses.
 
-The direct path is kept as a **fallback where the ABI provably permits it**, so a fresh checkout with
-no Rust toolchain and no published artefact behaves on Windows and ARM exactly as it did before the
-shim existed. On SysV there is no fallback, because there is nothing correct to fall back to. Three
-states, and `WGPU_BUN_SEAM=shim|direct|auto` forces the choice — `direct` on SysV is refused even
-when asked for, because an override may pick between correct paths, never select an incorrect one:
+The direct path is kept only as a **Win64 fallback**, so a fresh checkout with no Rust toolchain and
+no published artefact still works on the platform most people meet the package on. Elsewhere there
+is nothing correct to fall back to. `WGPU_BUN_SEAM=shim|direct|auto` forces the choice; `direct` off
+Win64 is refused even when asked for, because an override may pick between correct paths, never
+select an incorrect one:
 
 | state | when |
 |---|---|
 | `shim` | a shim library resolved — preferred on every platform |
-| `direct` | no shim, but this ABI passes the aggregates by hidden reference |
-| `refuse` | no shim, and this ABI cannot express the call |
+| `direct` | no shim, and **both** by-value rules permit a pointer — Win64 only |
+| `refuse` | no shim, and either rule does not |
 
 A refusal throws `AbiUnsupportedError`, which is a distinct class on purpose: it is a distinct and
 expected condition, and filing it under anything else is how a reader ends up debugging a driver
@@ -368,31 +387,45 @@ has run. Both can be true; only one is evidence. Everything below is one or the 
 
 | | |
 |---|---|
-| The whole suite on `win32-x64`, discrete NVIDIA adapter, D3D12 | adapter → device → compute dispatch → render to texture → readback → error scopes |
-| Both seam paths on `win32-x64` | `WGPU_BUN_SEAM=shim` and `=direct` each run the full suite green; the shim binds all seven entry points |
+| The whole suite on `win32-x64` — discrete NVIDIA/D3D12 locally, WARP in CI | adapter → device → compute dispatch → render to texture → readback → error scopes |
+| Both seam paths on `win32-x64` | `WGPU_BUN_SEAM=shim` and `=direct` each run the full suite green |
+| The shim's trampolines on `win32-x64` | all five installed and firing; a 246-character validation message decoded through the flat `(data, length)` path |
 | The shim's `sizeof` against the derived layouts | at runtime, on the real target, for all five aggregates it declares |
+| The version-skew guard | a shim reporting the wrong flat-ABI version is refused at load, as `AbiUnsupportedError` |
 | The struct-layout oracle on `win32-x64` | all 115 aggregates, `sizeof`/`offsetof` from a real C compiler on the pinned headers |
+| **The shim compiles on all four platforms** | CI built and uploaded it on `win32-x64`, `linux-x64`, `linux-arm64` and `darwin-arm64` |
+| **That `linux-x64`, `linux-arm64` and `darwin-arm64` did NOT work** | all three hit the by-value callback defect; that is a measurement, and it is why the section below is shorter than it was |
 | Two of the forty abort-on-call symbols, by hand | `wgpuBufferWriteMappedRange` aborts; `wgpuBufferGetMappedRange` works |
 
 ### Argued, not executed
 
 | | Basis | What would settle it |
 |---|---|---|
-| `linux-x64`, `linux-arm64`, `darwin-arm64` — anything at all | they compile and typecheck | running the CI matrix once |
-| **The SysV calling sequence** the shim exists to produce | the psABI aggregate-classification rule, plus the fact that a real compiler emits it | a `linux-x64` run; this is the single most load-bearing unexecuted claim here |
-| AArch64 by-value behaviour | AAPCS: >16 bytes is indirect | an `arm64` run |
+| **That the callback-trampoline fix works** on the three platforms it was written for | the defect is understood, the mechanism is proven on Win64, and the decoding is now a compiler's job on the target | one CI matrix run; this is now the single most load-bearing unexecuted claim here |
+| **The SysV calling sequence** for the 40-byte argument | the psABI classification rule, plus a real compiler emitting it | a `linux-x64` run |
+| AArch64 register assignment for both aggregate sizes | AAPCS: >16 B indirect, ≤16 B in up to two GPRs | an `arm64` run |
 | Struct layouts being identical on all four platforms | both headers use only fixed-width scalars, enums, pointers and `size_t` — no `long`, no bitfields, no arrays, so LLP64 and LP64 cannot diverge | the oracle running on the other three |
 | Whether the layout oracle's header-shadowing trick survives outside Windows | it has only ever run there | the same |
 | Thirty-eight of the forty abort-on-call symbols | upstream's Rust source at the pinned tag | the subprocess-per-symbol sweep (`bun run derive:aborts:probe`) |
-| That a hosted macOS runner exposes a usable Metal device | paravirtualised Metal is documented to exist | a `darwin-arm64` run |
+| That a hosted macOS runner exposes a usable Metal device | paravirtualised Metal is documented to exist; the `darwin-arm64` leg got as far as *asking* for an adapter, so the stack initialises | a `darwin-arm64` run that completes |
+
+### What the first matrix run actually taught
+
+Worth stating separately, because it is the most useful thing in this file for anyone extending the
+package: **three platforms failing identically is evidence about a shared rule, not about three
+platforms.** The failing set (`linux-x64`, `linux-arm64`, `darwin-arm64`) matched neither ABI group
+the package documented, which read as "therefore not an ABI problem". It was an ABI problem — it just
+belonged to a *different* aggregate, with a *different* rule, in the *opposite* direction. Whenever a
+failure set does not match your model's partitions, the model has the wrong partitions.
 
 ## Remaining gaps
 
 Ordered by what blocks a release.
 
-1. **The platform matrix has never run.** Four supported platforms, one measured. Everything in
-   *Argued* above resolves the first time CI runs green, and nothing should be published before it
-   does.
+1. **Three of the four platforms have never passed.** The matrix has now run once: the shim built
+   everywhere, `win32-x64` went green on WARP, and the other three found the callback ABI defect
+   described under [The ABI seam](#the-abi-seam). That is fixed and unverified — the fix cannot be
+   executed from a Windows machine. Nothing should be published before a green matrix.
 2. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
    `bun run shim:fetch` refuses to install, by design. Until then the acquisition paths are
    `bun run shim:build` (needs cargo) or the platform npm package, which does not exist either.
@@ -424,9 +457,10 @@ bun run typecheck
 bun test
 ```
 
-`shim:build` is optional on Windows and ARM, where the direct path is correct anyway — but building
-it means the tests exercise the path that ships. On `linux-x64` it is not optional: without it the
-GPU suites skip with `abi-unsupported`.
+`shim:build` is optional **only on `win32-x64`**, where the direct path is correct anyway — and even
+there it is worth building, because it is the path that ships everywhere else. On `linux-x64`,
+`linux-arm64` and `darwin-arm64` it is not optional: without it the GPU suites skip with
+`abi-unsupported`.
 
 ## Usage
 
@@ -591,10 +625,19 @@ WGPU_BUN_SEAM=direct bun test  # the same suite over the other calling path, whe
 | No adapter on this host | **fails** | `WGPU_BUN_ALLOW_NO_ADAPTER=1` |
 | `requestDevice` failed with an adapter present | **fails** | none — that is a defect |
 | The ABI needs the shim and none is installed | skips | none; the escape is installing it |
+| A native call's callback never arrived | **fails** | none — see below |
 | The binding is unimplemented | skips | none; see below |
 
 The escapes are environment variables rather than auto-detection, so granting one is a visible,
 per-job decision a reviewer can see in the workflow file, and a local run never grants itself one.
+
+**`no-callback` is its own reason too, and for the same argument one level along.** A call that is
+issued and never completes used to arrive here as `no-adapter` as well. Wrong twice: the runners that
+hit it *had* adapters, and `no-adapter` is escapable by an environment variable two matrix legs are
+granted — so a genuine completion defect could be skipped past on exactly the legs most likely to
+have one. It is never permitted. A device that never answers and a binding that mis-decodes its own
+callback arguments produce the identical symptom, so the thrown error prints the seam's requested /
+resolved / bound modes and the shim path, rather than telling the reader to go and find them.
 
 **`abi-unsupported` is its own reason, and that matters more than it looks.** The seam's refusal used
 to reach the gate as an untyped throw from `requestAdapter()` and get filed under `no-adapter` — a

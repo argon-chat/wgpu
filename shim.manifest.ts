@@ -3,37 +3,44 @@
  *
  * ── What the shim is ────────────────────────────────────────────────────────────────────────────
  *
- * `bun:ffi` cannot express a C aggregate passed **by value**, and seven wgpu-native entry points
- * take one. `shim/` is a small Rust `cdylib` that declares those aggregates as real `#[repr(C)]`
- * structs, lets a real compiler emit the calling sequence, and re-exports the seven functions with
- * flat pointer parameters — exactly the signature `src/ffi/abiSeam.ts` already uses. See that file
- * for the ABI reasoning and `shim/src/lib.rs` for the implementation.
+ * `bun:ffi` cannot express a C aggregate passed **by value**, and wgpu-native does it in both
+ * directions: seven entry points take one as an argument, and every callback receives its `message`
+ * as a `WGPUStringView` by value. `shim/` is a small Rust `cdylib` that declares those aggregates as
+ * real `#[repr(C)]` structs and hands JavaScript a flat surface in both directions — pointer
+ * parameters going in, split `(data, length)` coming back out through C trampolines. See
+ * `src/ffi/abiSeam.ts` for the reasoning and `shim/src/lib.rs` for the implementation.
  *
- * ── Why it is built for every platform, not only where it is required ───────────────────────────
+ * ── It is required on three of the four supported platforms ─────────────────────────────────────
  *
- * Only `linux-x64` *needs* it among the four supported RIDs: `win32-x64` is Win64 and the two
- * `arm64` targets are AAPCS, and both of those pass these aggregates by hidden reference, so the
- * JS-only path is the correct calling sequence there (proven by execution on Windows). Building the
- * shim for SysV alone would be less work — one target instead of four.
+ * An earlier revision of this comment said "only `linux-x64` needs it", on the strength of the
+ * 40-byte argument rule alone. That was wrong, and it cost a full CI matrix to find out. The two
+ * aggregate sizes group the platforms **differently** (see {@link abiPassesLargeAggregatesByReference}
+ * and {@link abiPassesStringViewByReference}): for the 40-byte argument SysV is the outlier, and for
+ * the 16-byte callback parameter **Win64 is the outlier and the other three agree**.
  *
- * It is built everywhere anyway, and the reason is where the code gets *exercised*. A SysV-only shim
- * would run on exactly one platform: the one a developer on Windows cannot execute, cannot attach a
- * debugger to, and cannot bisect on. Its first real run would be in CI on the platform where a
- * mistake is most expensive to diagnose. Built for every platform, the same code runs on every test
- * invocation on the maintainer's own machine against a real GPU — so a wrong struct member or a
- * mis-transcribed prototype surfaces where it is cheap, and what ships to SysV is code that has been
- * executed thousands of times.
+ * So the direct path is correct on `win32-x64` and nowhere else. `linux-x64`, `linux-arm64` and
+ * `darwin-arm64` all require the shim, and without it all three fail the same way: the correlation
+ * ticket is read out of the register holding `message.length`, arrives as garbage, is correctly
+ * ignored as an unknown ticket, and the operation never completes. It presents as a hang in
+ * `requestAdapter` with no ABI error anywhere.
  *
- * The cost of that choice is a four-target build matrix instead of one. It is paid by CI runners
- * that already exist for the test matrix, and it buys the only thing that actually makes the SysV
- * claim credible.
+ * ── Why it is nonetheless built for every platform, including the one that does not need it ─────
+ *
+ * Building it only where it is required would now be three targets instead of four — a much smaller
+ * saving than it once looked, and still the wrong trade. The argument was always about **where the
+ * code gets exercised**: a shim absent from the one platform a maintainer can actually run means the
+ * shipped calling path is never executed interactively, never attached to a debugger, never bisected.
+ * Built everywhere, the same trampolines run on every local test invocation against a real GPU.
+ *
+ * That the platform not needing it is also the only one anyone can execute here is precisely why it
+ * must be built there.
  *
  * ── …and why the direct path is still kept ──────────────────────────────────────────────────────
  *
- * Preferring the shim is not the same as requiring it. Where the ABI provably permits the direct
- * path, an absent shim falls back to it rather than failing: that keeps a fresh checkout with no
- * Rust toolchain and no published artefact working exactly as it does today on Windows and ARM. On
- * SysV there is no fallback, because there is nothing correct to fall back to.
+ * Preferring the shim is not the same as requiring it. On Win64 — and only there — an absent shim
+ * falls back to the direct path rather than failing, so a fresh checkout with no Rust toolchain and
+ * no published artefact still works on the platform most likely to be someone's first contact with
+ * the package. Everywhere else there is nothing correct to fall back to and the seam refuses.
  *
  * `WGPU_BUN_SEAM=shim|direct|auto` forces the choice, which is what lets one machine A/B both paths.
  */
@@ -47,15 +54,17 @@ import { currentRid, platformOf, type IArchiveAsset, type Rid } from "./wgpu-nat
  * library and refuses a mismatch, because a silently different signature corrupts a stack rather
  * than raising an error.
  */
-export const SHIM_ABI_VERSION = 1;
+export const SHIM_ABI_VERSION = 2;
 
 /**
  * The shim crate's own release version — what names its published artefacts.
  *
- * Separate from the package version on purpose: the shim only changes when the seven wrapped
- * prototypes or the wgpu-native generation change, which is far less often than the binding.
+ * Separate from the package version on purpose: the shim only changes when the wrapped prototypes or
+ * the wgpu-native generation change, which is far less often than the binding. `2.0.0` is where the
+ * callback trampolines were added — a new exported surface, so `SHIM_ABI_VERSION` moved with it and
+ * a 1.x artefact is refused at load rather than called with the wrong signatures.
  */
-export const SHIM_VERSION = "1.0.0";
+export const SHIM_VERSION = "2.0.0";
 
 /** Git tag the shim artefacts are published under. */
 export const SHIM_RELEASE_TAG = `shim-v${SHIM_VERSION}`;
@@ -84,26 +93,66 @@ export function rustTargetFor(rid: Rid): string | null {
 }
 
 /**
- * Can `bun:ffi` express this platform's calling sequence for a by-value aggregate?
+ * ── The two by-value questions, which have different answers ────────────────────────────────────
  *
- * `true` where an aggregate argument is passed by hidden reference — Win64 for anything not exactly
- * 1/2/4/8 bytes, AArch64 AAPCS for anything over 16 — so passing a pointer to a packed buffer is not
- * a substitution but the correct sequence.
+ * "Can `bun:ffi` express a by-value aggregate here" is not one question. Two aggregate sizes cross
+ * this boundary, in opposite directions, and the ABIs group differently for each:
  *
- * `false` under SysV x86-64, where a >16-byte aggregate is copied onto the stack and a 16-byte
- * two-integer aggregate goes in two registers. Neither is producible from JavaScript, and the second
- * is not detectable by size.
+ * | | Win64 | AArch64 AAPCS | SysV x86-64 |
+ * |---|---|---|---|
+ * | **40 B** `*CallbackInfo`, an **argument** | hidden reference | indirect (>16 B) | **stack (MEMORY)** |
+ * | **16 B** `WGPUStringView`, a **callback parameter** | hidden reference (∉ {1,2,4,8}) | **two registers** (≤16 B) | **two registers** |
  *
- * Deliberately a function of (platform, arch) rather than a lookup of `process.*`, so the rule can be
- * tested for hosts this machine is not.
+ * For the 40-byte argument SysV is the outlier. For the 16-byte callback parameter **Win64 is the
+ * outlier and the other three agree**. Treating them as one question is what produced a binding that
+ * hung inside `requestAdapter` on `linux-x64`, `linux-arm64` and `darwin-arm64` simultaneously while
+ * passing everything on Windows — the correlation ticket was read out of the register holding
+ * `message.length`, the resulting unknown ticket was correctly ignored, and the promise never
+ * settled. No ABI error was raised anywhere, because from the machine's point of view nothing went
+ * wrong.
+ *
+ * Both predicates are functions of (platform, arch) rather than lookups of `process.*`, so the rules
+ * can be asserted for hosts this machine is not — which is the only way a claim about an ABI nobody
+ * here can execute gets tested at all.
+ */
+
+/** Is a >16-byte aggregate **argument** passed by hidden reference, so a pointer is the right call? */
+export function abiPassesLargeAggregatesByReference(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): boolean {
+  if (arch === "arm64") return true; // AArch64 AAPCS: >16 B is indirect, address in a register
+  if (platform === "win32" && arch === "x64") return true; // Win64: size ∉ {1,2,4,8} → hidden reference
+  return false; // SysV x86-64 copies it onto the stack; anything unrecognised is assumed to as well
+}
+
+/**
+ * Is a 16-byte two-integer aggregate **callback parameter** passed by hidden reference?
+ *
+ * True on Win64 alone. AArch64 and SysV both put it in two registers, which no single `FFIType.ptr`
+ * parameter can receive.
+ */
+export function abiPassesStringViewByReference(
+  platform: string = process.platform,
+  arch: string = process.arch,
+): boolean {
+  return platform === "win32" && arch === "x64";
+}
+
+/**
+ * Can the JS-only direct path be correct on this host?
+ *
+ * Only where **both** questions answer yes, which is Win64 and nowhere else. This is a narrowing of
+ * what an earlier revision claimed: AArch64 was listed as safe on the strength of the 40-byte rule
+ * alone, and the 16-byte callback rule makes it not.
  */
 export function abiExpressesByValueAggregates(
   platform: string = process.platform,
   arch: string = process.arch,
 ): boolean {
-  if (arch === "arm64") return true; // AArch64 AAPCS — win/linux/darwin alike
-  if (platform === "win32" && arch === "x64") return true; // Win64
-  return false; // SysV x86-64, and anything unrecognised: assume it needs the shim
+  return (
+    abiPassesLargeAggregatesByReference(platform, arch) && abiPassesStringViewByReference(platform, arch)
+  );
 }
 
 /** Is the shim mandatory for a host, i.e. is there no correct direct path? */

@@ -33,7 +33,7 @@ import { FFIType, JSCallback, read } from "bun:ffi";
 
 import { seam } from "../ffi/abiSeam.ts";
 import {
-  callbacks,
+  callbackAddress,
   devicePoll,
   processEvents,
   settle,
@@ -184,7 +184,7 @@ export async function requestDevice(
 
   const info = arena.struct("WGPURequestDeviceCallbackInfo");
   info.setEnum("mode", C.callbackMode.allowProcessEvents);
-  info.setPtr("callback", callbacks.requestDevice.ptr);
+  info.setPtr("callback", callbackAddress("requestDevice"));
   const infoPtr = arena.hold(info);
 
   const instance = adapter.gpu.instance;
@@ -334,7 +334,7 @@ export class GPUDevice {
     const arena = new Arena();
     const info = arena.struct("WGPUPopErrorScopeCallbackInfo");
     info.setEnum("mode", C.callbackMode.allowProcessEvents);
-    info.setPtr("callback", callbacks.popErrorScope.ptr);
+    info.setPtr("callback", callbackAddress("popErrorScope"));
     const infoPtr = arena.hold(info);
 
     const result = await settle<IErrorScopeResult>(

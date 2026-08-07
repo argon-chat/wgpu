@@ -34,7 +34,7 @@
 import { toArrayBuffer } from "bun:ffi";
 
 import { seam } from "../ffi/abiSeam.ts";
-import { callbacks, devicePoll, processEvents, settle, type IStatusResult } from "../ffi/async.ts";
+import { callbackAddress, devicePoll, processEvents, settle, type IStatusResult } from "../ffi/async.ts";
 import { wgpu } from "../ffi/library.ts";
 import { asAddress, requireHandle, type Ptr } from "../ffi/pointer.ts";
 import { Arena } from "../desc/build.ts";
@@ -116,7 +116,7 @@ export class GPUBuffer extends GPUResource {
     const arena = new Arena();
     const info = arena.struct("WGPUBufferMapCallbackInfo");
     info.setEnum("mode", C.callbackMode.allowProcessEvents);
-    info.setPtr("callback", callbacks.bufferMap.ptr);
+    info.setPtr("callback", callbackAddress("bufferMap"));
     const infoPtr = arena.hold(info);
 
     const result = await settle<IStatusResult>(

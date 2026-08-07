@@ -17,7 +17,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-import { seamStatus } from "../../src/index.ts";
+import { seamBoundMode, seamStatus } from "../../src/index.ts";
 import { gate, skipIsPermitted } from "./gpu.ts";
 
 const markerIdx = process.argv.indexOf("--marker");
@@ -34,14 +34,28 @@ const summary = {
   // thing a reader most wants to know when comparing two legs of the matrix, and inferring it from
   // the absence of an error is how the previous misclassification survived.
   seam: seam.mode,
+  // What was RESOLVED and what was actually BOUND are different facts, and only the second proves a
+  // path executed. `gpu.ts` has already run a full adapter+device acquisition by the time this is
+  // read, so a null here on a `ready` gate would mean the seam was never reached at all.
+  seamBound: seamBoundMode(),
+  seamRequested: process.env["WGPU_BUN_SEAM"] ?? "auto",
+  seamReason: seam.reason,
   shim: seam.shim ? `${seam.shim.version ?? "?"} via ${seam.shim.source}` : null,
+  shimPath: seam.shim?.path ?? null,
+  shimRequired: seam.shimRequired,
   detail: gate.kind === "ready" ? null : gate.detail,
 };
 
 console.log(`\nwgpu-bun GPU preflight — ${summary.platform}`);
 console.log(`  gate      : ${summary.gate}`);
 console.log(`  adapter   : ${summary.adapter ?? "(none)"}`);
-console.log(`  seam      : ${summary.seam}${summary.shim ? ` (shim ${summary.shim})` : ""}`);
+// Printed unconditionally and in full. The deadline error tells a reader to check `seamStatus()`
+// and `seamBoundMode()`; before this it gave them no way to see either, which is a gap worth closing
+// whatever the cause turns out to be.
+console.log(`  seam      : requested=${summary.seamRequested} resolved=${summary.seam} bound=${summary.seamBound ?? "(not bound)"}`);
+console.log(`  shim      : ${summary.shimPath ?? "(none installed)"}${summary.shim ? ` — ${summary.shim}` : ""}`);
+console.log(`  shim req'd: ${summary.shimRequired}`);
+console.log(`  seam why  : ${summary.seamReason}`);
 console.log(`  permitted : ${summary.permitted}`);
 if (summary.detail) console.log(`  detail    : ${summary.detail.split("\n")[0]}`);
 console.log("");
