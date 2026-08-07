@@ -1,6 +1,6 @@
 {
   "name": "wgpu-bun",
-  "version": "0.1.0",
+  "version": "29.0.0",
   "description": "Bun FFI binding to wgpu-native, API-compatible with the `webgpu` npm package. Pre-alpha: skeleton only.",
   "license": "MIT",
   "author": "Yuuki Wesp <y.wesp@argon.gl>",

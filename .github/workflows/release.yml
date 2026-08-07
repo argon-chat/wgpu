@@ -132,6 +132,26 @@ jobs:
             bun run fetch --rid "$rid"
           done
 
+      - name: The tag and the package version must be the same release
+        # Only meaningful on a tag push; a manual dispatch has no tag to disagree with.
+        #
+        # Without this, `git tag v29.0.1` on a tree whose package.json says 29.0.0 publishes
+        # **29.0.0** and leaves a tag that names a version nobody can install. npm versions cannot be
+        # reused, so the repair is to burn another number — which is why this is a preflight and not
+        # something to notice afterwards.
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#v}"
+          pkg="$(bun -e 'console.log(require("./package.json").version)')"
+          if [ "$tag" != "$pkg" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${pkg}"
+            echo "Tag the release as v${pkg}, or bump package.json to ${tag} — but do not publish"
+            echo "a version that no tag names."
+            exit 1
+          fi
+          echo "tag ${GITHUB_REF_NAME} matches package.json ${pkg}"
+
       - run: bun run check:layouts
       - run: bun run derive:aborts:source -- --check
 

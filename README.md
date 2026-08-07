@@ -29,8 +29,12 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 > cannot reach a device are configured to **fail rather than skip**, so a green matrix means the
 > suite ran, not that it was excused.
 >
-> **Not yet published.** `private: true` is still set, and the prebuilt shim artefacts are not
-> released. See [Remaining gaps](#remaining-gaps).
+> **Versioning: the major is the wgpu-native generation.** `wgpu-bun@29.x.y` binds wgpu-native
+> **v29**. That digit is not a marketing choice and not a maturity signal — it names the native
+> library inside, which is what decides ABI, validation strictness and WGSL acceptance. When
+> upstream moves to v30, so does this package's major, on the same day and for that reason alone.
+> Minor and patch are ordinary semver for this binding's own changes. See
+> [Versioning](#versioning).
 >
 > [What is proven and what is argued](#what-is-proven-and-what-is-argued) still separates every
 > claim resting on execution from every claim resting on a specification — the distinction that
@@ -315,6 +319,35 @@ That is deliberate rather than convenient: a shim transcribes one wgpu-native ge
 so the two are only correct as a pair, and shipping them together makes separating them impossible
 rather than merely inadvisable. Resolution is the same three tiers as the native library —
 `WGPU_BUN_SHIM_LIB` → `@wgpu-bun/<rid>` → `vendor/<rid>/`.
+
+## Versioning
+
+**The major version is the wgpu-native generation this package binds.**
+
+```
+wgpu-bun@29.0.0
+         ││ └── patch — this binding's own changes
+         │└──── minor — this binding's own changes
+         └───── major — wgpu-native v29. Not ours to pick.
+```
+
+Pick the major that matches the native behaviour you want; the rest is ordinary semver. A bump from
+`29.x` to `30.x` means the native library changed generation — expect different validation, possibly
+different WGSL acceptance — and it will happen even if not one line of this binding changed.
+
+**Why not mirror the upstream tag exactly.** wgpu-native tags have four components (`v29.0.1.1`:
+wgpu-core `29.0.1`, then upstream's own revision) and semver has three. Something had to give, so
+the exact tag lives where it can be read in full instead — [`wgpu-native.manifest.ts`](./wgpu-native.manifest.ts),
+this README, and the `.version` stamp written next to the installed library. The one part that could
+have rotted silently is enforced instead: a test asserts this package's major **is**
+`WGPU_NATIVE_MAJOR`, so a pin bump to v30 cannot ship as `29.x` and tell every consumer the ABI did
+not move.
+
+**Why not track the [`webgpu`](https://www.npmjs.com/package/webgpu) package's version**, given this
+is API-compatible with it: that number moves for its own reasons — Dawn updates, its own fixes — and
+would say nothing about which native library is inside. Between "what API shape do I get" and "what
+implementation will actually run my shaders", the second is the one people are choosing a binding
+for, and the second is what this number answers.
 
 ## Scope
 

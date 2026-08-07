@@ -11,6 +11,9 @@
  * supply-chain file is worse than a blank one, because it looks checked.
  */
 import { describe, expect, test } from "bun:test";
+import * as fs from "node:fs";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   ASSETS,
@@ -27,6 +30,8 @@ import {
 /** The platforms this package claims to support. Changing this list is a release decision. */
 const EXPECTED_RIDS = ["win32-x64", "darwin-arm64", "linux-x64", "linux-arm64"] as const;
 
+const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
 describe("the pinned release", () => {
   test("the tag and the major agree", () => {
     // WGPU_NATIVE_MAJOR is the wgpu-core generation, which is what determines ABI and validation
@@ -37,6 +42,26 @@ describe("the pinned release", () => {
 
   test("covers exactly the RIDs the package advertises", () => {
     expect([...supportedRids()].sort()).toEqual([...EXPECTED_RIDS].sort());
+  });
+
+  test("the package's major version IS the wgpu-native generation it binds", () => {
+    // The versioning contract, enforced rather than documented.
+    //
+    // `wgpu-bun@29.x.y` binds wgpu-native v29. The major is not ours to choose: it names the native
+    // generation, which is what actually decides ABI, validation strictness and WGSL acceptance —
+    // the things a consumer is choosing this package *for*. Minor and patch are ours.
+    //
+    // Upstream's tag has four components (`v29.0.1.1`) and semver has three, so the exact tag
+    // cannot live in the version string. It lives in `WGPU_NATIVE_TAG`, in the README, and in the
+    // `.version` stamp beside the installed library — three places a reader can reach. What this
+    // test guarantees is the part that would otherwise rot silently: that a pin bump to v30 cannot
+    // ship as `29.x` and quietly tell every consumer the ABI did not move.
+    const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf-8")) as {
+      version: string;
+    };
+    const major = Number(pkg.version.split(".")[0]);
+    expect(Number.isInteger(major)).toBe(true);
+    expect(major).toBe(WGPU_NATIVE_MAJOR);
   });
 });
 
