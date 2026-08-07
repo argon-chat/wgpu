@@ -45,10 +45,14 @@ interface IHeaderSource {
 /**
  * Find a vendored `include/` directory.
  *
- * Any RID's headers will do: they are byte-identical copies of the same upstream `ffi/` sources, and
- * the layouts derived from them are identical across every 64-bit target (see `cabi.ts`). The RID
- * actually used is recorded in the provenance file so that claim stays checkable rather than
- * assumed.
+ * Any RID's headers will do: they are the same upstream `ffi/` sources, and the layouts derived from
+ * them are identical across every 64-bit target (see `cabi.ts`). The RID actually used is recorded
+ * in the provenance file so that claim stays checkable rather than assumed.
+ *
+ * ⚠ They are NOT byte-identical, which an earlier revision of this comment claimed. The Windows
+ * release archive ships the headers with CRLF and the Linux/macOS archives with LF; strip the CR and
+ * the two hash the same. That difference is invisible to everything here except a raw byte hash —
+ * see {@link readHeader}.
  */
 function locateIncludeDir(): { rid: string; dir: string } {
   const override = process.env["WGPU_NATIVE_INCLUDE"];
@@ -67,12 +71,27 @@ function locateIncludeDir(): { rid: string; dir: string } {
   );
 }
 
+/**
+ * Read a header, normalising line endings before both parsing and hashing.
+ *
+ * The hash is over LF-normalised text, NOT the raw bytes, and that is load-bearing: upstream ships
+ * the same headers with CRLF in the Windows archive and LF in the others, so a raw-byte hash records
+ * a fingerprint that only reproduces on the platform the generator happened to run on. Every other
+ * leg of a CI matrix then reports the committed provenance as stale and demands a regeneration that
+ * would immediately be stale somewhere else — a check that can never be satisfied on more than one
+ * platform at a time.
+ *
+ * Normalising keeps the property the provenance exists to assert (these layouts came from these
+ * headers) while dropping the one thing that is not a difference in the headers. A real content
+ * change still moves the hash.
+ */
 function readHeader(dir: string, file: string): IHeaderSource {
-  const buf = fs.readFileSync(path.join(dir, file));
+  const raw = fs.readFileSync(path.join(dir, file)).toString("utf-8");
+  const text = raw.replace(/\r\n/g, "\n");
   return {
     file,
-    text: buf.toString("utf-8"),
-    sha256: crypto.createHash("sha256").update(buf).digest("hex"),
+    text,
+    sha256: crypto.createHash("sha256").update(text, "utf-8").digest("hex"),
   };
 }
 
@@ -343,13 +362,23 @@ function emitAggregates(constName: string, aggs: readonly IRawAggregate[], resol
   return lines.join("\n");
 }
 
-function emitProvenance(rid: string, headers: readonly IHeaderSource[], counts: Record<string, number>): string {
+function emitProvenance(headers: readonly IHeaderSource[], counts: Record<string, number>): string {
   const entries = headers
     .map((h) => `  { file: ${JSON.stringify(h.file)}, sha256: ${JSON.stringify(h.sha256)} },`)
     .join("\n");
   return `${BANNER("the vendored wgpu-native headers")}
-/** The vendored RID whose headers were read. Layouts are identical across every 64-bit RID. */
-export const SOURCE_RID = ${JSON.stringify(rid)};
+// No RID is recorded here, deliberately.
+//
+// An earlier revision exported the vendored RID whose headers were read, on the reasoning that it
+// kept "any RID's headers will do" checkable. It did the opposite. Nothing consumed the value, while
+// its presence made this file's contents depend on WHICH machine generated it — so every leg of a CI
+// matrix found the committed file stale and demanded a regeneration that would then be stale
+// everywhere else. A generated file that varies by host cannot be compared byte-for-byte, and
+// comparing it byte-for-byte is the entire job of the staleness check.
+//
+// What actually makes the RID-invariance claim checkable is below: the digests are taken over
+// LF-normalised header text, so they agree across every platform's release archive, and the oracle
+// test compares derived offsets against a real C compiler on whatever host it runs on.
 
 /**
  * sha256 of each header this table was derived from.
@@ -440,7 +469,7 @@ export const UNION_NAMES = ${JSON.stringify(unions)} as const;
   );
   files.set(
     "provenance.ts",
-    emitProvenance(rid, [webgpu, wgpu], {
+    emitProvenance([webgpu, wgpu], {
       "webgpu.h": webgpuAggs.length,
       "wgpu.h": wgpuAggs.length,
     }),

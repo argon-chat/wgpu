@@ -8,8 +8,18 @@
  * (`test/layout-oracle.test.ts`), so this file is structurally incapable of carrying a wrong number.
  */
 
-/** The vendored RID whose headers were read. Layouts are identical across every 64-bit RID. */
-export const SOURCE_RID = "win32-x64";
+// No RID is recorded here, deliberately.
+//
+// An earlier revision exported the vendored RID whose headers were read, on the reasoning that it
+// kept "any RID's headers will do" checkable. It did the opposite. Nothing consumed the value, while
+// its presence made this file's contents depend on WHICH machine generated it — so every leg of a CI
+// matrix found the committed file stale and demanded a regeneration that would then be stale
+// everywhere else. A generated file that varies by host cannot be compared byte-for-byte, and
+// comparing it byte-for-byte is the entire job of the staleness check.
+//
+// What actually makes the RID-invariance claim checkable is below: the digests are taken over
+// LF-normalised header text, so they agree across every platform's release archive, and the oracle
+// test compares derived offsets against a real C compiler on whatever host it runs on.
 
 /**
  * sha256 of each header this table was derived from.
@@ -19,8 +29,8 @@ export const SOURCE_RID = "win32-x64";
  * scenario the whole derivation exists to prevent, so it fails the test rather than being tolerated.
  */
 export const HEADER_DIGESTS: readonly { readonly file: string; readonly sha256: string }[] = [
-  { file: "webgpu.h", sha256: "2516cf5a7bec4385bf76ecc550d45015c1e3df77962211f3cef3f57507b2f2c8" },
-  { file: "wgpu.h", sha256: "873faa1c1b63d48e4d866000fc51a163e85d0f7c6c01425c687d3f12d073ff74" },
+  { file: "webgpu.h", sha256: "a483031c3fed05ea5dd1c74082a71676c46c5b2b820ccca10da515c033efc997" },
+  { file: "wgpu.h", sha256: "7bd23656d394f620a804b1f174444ea17082b6d330a2fca0c0e6b1121ec4b284" },
 ];
 
 /** Aggregate counts, per header. A bump that adds or removes structs shows up here in review. */

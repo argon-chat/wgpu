@@ -1,0 +1,24 @@
+# Line endings are LF in the repository AND in the working tree, on every platform.
+#
+# Why this file exists, concretely: git's `core.autocrlf` defaults to `true` on Windows, and GitHub's
+# windows-latest runner inherits that. Without this file a checkout there rewrites every text file to
+# CRLF, while the layout generator writes LF — so `check:layouts` reported all five generated files
+# as stale on Windows and only on Windows. The generated layouts were fine; the checkout had edited
+# them.
+#
+# `eol=lf` (rather than plain `text=auto`) is the part that matters: it normalises the WORKING TREE,
+# not just what is stored. Any tool that compares generated output against a committed file needs the
+# two to be produced the same way, and that comparison is the whole point of a staleness check.
+* text=auto eol=lf
+
+# Binaries must never be touched. `vendor/` is ignored today, but an ignore rule is a decision that
+# can be revisited, whereas corrupting a shared library by newline conversion is not recoverable by
+# inspection — it just stops loading.
+*.dll  binary
+*.so   binary
+*.dylib binary
+*.a    binary
+*.lib  binary
+*.zip  binary
+*.wasm binary
+*.png  binary

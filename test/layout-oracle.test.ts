@@ -236,10 +236,12 @@ slots.forEach((slot, i) => {
 describe("derived C layouts vs. the C compiler", () => {
   test("the headers being compiled are the headers the tables were generated from", () => {
     for (const { file, sha256 } of HEADER_DIGESTS) {
-      const actual = crypto
-        .createHash("sha256")
-        .update(fs.readFileSync(path.join(INCLUDE_DIR, file)))
-        .digest("hex");
+      // LF-normalised, matching how `gen-layouts.ts` computes the digest it stores. Upstream ships
+      // the same headers with CRLF in the Windows archive and LF in the others, so a raw-byte hash
+      // is a fingerprint of the platform rather than of the header — it would pass on whichever host
+      // generated the tables and fail on every other leg of the matrix, for no real difference.
+      const text = fs.readFileSync(path.join(INCLUDE_DIR, file)).toString("utf-8").replace(/\r\n/g, "\n");
+      const actual = crypto.createHash("sha256").update(text, "utf-8").digest("hex");
       expect(
         actual,
         `${file} has changed since src/layouts/generated/ was produced. ` +
