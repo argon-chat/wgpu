@@ -43,7 +43,11 @@ export {
 export { NotImplementedError, createInstance } from "./binding.ts";
 export { globals, installNavigatorGpu } from "./globals.ts";
 export { nativeLibrary, nativeVersion, type INativeVersion } from "./ffi/library.ts";
-export { CallbackDeadlineError, pendingOperations } from "./ffi/async.ts";
+export {
+  CallbackDeadlineError,
+  pendingOperations,
+  unmatchedDeviceCallbackCount,
+} from "./ffi/async.ts";
 export { UNIMPLEMENTED, isUnimplemented } from "./ffi/unimplemented.ts";
 export {
   AbiUnsupportedError,

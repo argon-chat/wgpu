@@ -29,12 +29,14 @@
  * so any internal scope that settles during that pump still has a live entry to deposit into.
  */
 
-import { FFIType, JSCallback, read } from "bun:ffi";
+import { read } from "bun:ffi";
 
 import { seam } from "../ffi/abiSeam.ts";
 import {
   callbackAddress,
   devicePoll,
+  noteUnmatchedDeviceCallback,
+  setDeviceCallbackHandler,
   processEvents,
   settle,
   type IErrorScopeResult,
@@ -42,7 +44,6 @@ import {
 } from "../ffi/async.ts";
 import { wgpu } from "../ffi/library.ts";
 import { asAddress, requireHandle, type Ptr } from "../ffi/pointer.ts";
-import { readStringView } from "../ffi/strings.ts";
 import { Arena } from "../desc/build.ts";
 import {
   packBindGroupDescriptor,
@@ -86,32 +87,32 @@ import { GPUCommandEncoder } from "./encoder.ts";
 const devices = new Map<number, GPUDevice>();
 let nextDeviceId = 1;
 
-const { ptr, u32, u64, void: v } = FFIType;
+/**
+ * Route the two device-scoped native callbacks to the device they name.
+ *
+ * The `JSCallback`s themselves are **not** built here, and that is the point of the arrangement.
+ * Their C prototypes take `WGPUStringView` by value, which is an ABI question, and this file got
+ * that question wrong — it declared `message` as a pointer, which is right on Win64 and wrong on the
+ * other three platforms, where `userdata1` then arrived as half of the message. `devices.get(...)?.`
+ * found nothing and returned, silently, and the enclosing `try/catch` would have hidden anything
+ * that did throw.
+ *
+ * Every `new JSCallback` in this package now lives in `src/ffi/async.ts`, which is the one module
+ * that knows which seam path is bound and therefore which argument shape is correct. What this file
+ * registers is a plain function: no FFI types, no ABI decisions, nothing that can be wrong about a
+ * calling convention.
+ */
+setDeviceCallbackHandler("uncapturedError", (deviceId, errorType, message) => {
+  const device = devices.get(deviceId);
+  if (!device) return noteUnmatchedDeviceCallback("uncapturedError", deviceId);
+  device.handleUncapturedError(errorType, message);
+});
 
-/** `(WGPUDevice const*, WGPUErrorType, WGPUStringView, userdata1, userdata2)` */
-const uncapturedErrorCallback = new JSCallback(
-  (_device: number, errorType: number, message: number, ud1: bigint) => {
-    // Must never throw: this frame returns into Rust.
-    try {
-      devices.get(Number(ud1))?.handleUncapturedError(errorType, readStringView(message));
-    } catch {
-      /* swallowed on purpose — see the module header */
-    }
-  },
-  { args: [ptr, u32, ptr, u64, u64], returns: v },
-);
-
-/** `(WGPUDevice const*, WGPUDeviceLostReason, WGPUStringView, userdata1, userdata2)` */
-const deviceLostCallback = new JSCallback(
-  (_device: number, reason: number, message: number, ud1: bigint) => {
-    try {
-      devices.get(Number(ud1))?.handleDeviceLost(reason, readStringView(message));
-    } catch {
-      /* swallowed on purpose */
-    }
-  },
-  { args: [ptr, u32, ptr, u64, u64], returns: v },
-);
+setDeviceCallbackHandler("deviceLost", (deviceId, reason, message) => {
+  const device = devices.get(deviceId);
+  if (!device) return noteUnmatchedDeviceCallback("deviceLost", deviceId);
+  device.handleDeviceLost(reason, message);
+});
 
 /** What a device lost report looks like. */
 export class GPUDeviceLostInfo {
@@ -172,12 +173,12 @@ export async function requestDevice(
 
   // ███ The precondition. Without this, the first validation error aborts the process. ███
   d.sub("uncapturedErrorCallbackInfo")
-    .setPtr("callback", uncapturedErrorCallback.ptr)
+    .setPtr("callback", callbackAddress("uncapturedError"))
     .setPtr("userdata1", deviceId);
 
   d.sub("deviceLostCallbackInfo")
     .setEnum("mode", C.callbackMode.allowProcessEvents)
-    .setPtr("callback", deviceLostCallback.ptr)
+    .setPtr("callback", callbackAddress("deviceLost"))
     .setPtr("userdata1", deviceId);
 
   const descriptorPtr = arena.hold(d);

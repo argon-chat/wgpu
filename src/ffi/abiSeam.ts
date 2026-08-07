@@ -185,6 +185,12 @@ export const CALLBACK_SLOTS = {
   bufferMap: 2,
   popErrorScope: 3,
   queueWorkDone: 4,
+  // Installed in the `WGPUDeviceDescriptor` at device creation rather than handed to one of the
+  // entry points above — which is precisely why two separate sweeps for by-value callback hazards
+  // walked past them. Their C prototypes take `WGPUStringView` by value like every other callback
+  // here, so how they are *installed* has no bearing on which ABI rule governs them.
+  uncapturedError: 5,
+  deviceLost: 6,
 } as const;
 
 /** Name of a wgpu-native callback this seam can install a trampoline for. */

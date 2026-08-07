@@ -75,6 +75,14 @@ jobs:
         # job of its own rather than part of the offline suite.
         run: bun run derive:aborts:source -- --check
 
+      - name: Callback-ABI structural guard
+        # Asserts, without a GPU, that no new `JSCallback` can be added outside the one module that
+        # knows which seam path is bound, and that every by-value-StringView callback in the pinned
+        # header has a trampoline or a documented exemption. Two ABI defects of exactly this shape
+        # were each found by a sweep, on three platforms at once, and both were silent — this is the
+        # check that replaces the sweep.
+        run: bun test test/callback-abi.test.ts
+
       - name: Shim crate unit tests
         # Cheap and host-independent: the crate's own assertions about `size_of` and member offsets
         # for the aggregates it declares. They are the compiler's view of the same C types the

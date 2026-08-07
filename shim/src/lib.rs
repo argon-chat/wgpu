@@ -69,7 +69,7 @@ use std::sync::{Mutex, OnceLock};
 /// Bumped whenever an exported signature changes shape. `src/ffi/abiSeam.ts` refuses to bind a shim
 /// that reports a different number, because the failure mode of a silently mismatched signature is a
 /// corrupted stack, not an error.
-const SHIM_ABI_VERSION: u32 = 2;
+const SHIM_ABI_VERSION: u32 = 3;
 
 /// The wgpu-native generation whose struct definitions are transcribed below.
 ///
@@ -647,21 +647,38 @@ type FlatHandleCb = unsafe extern "C" fn(u32, *mut c_void, *const c_char, u64, u
 type FlatStatusCb = unsafe extern "C" fn(u32, *const c_char, u64, u64, u64);
 /// `(status, error_type, msg_data, msg_len, userdata1, userdata2)`
 type FlatErrorScopeCb = unsafe extern "C" fn(u32, u32, *const c_char, u64, u64, u64);
+/// `(device_ptr, code, msg_data, msg_len, userdata1, userdata2)`
+///
+/// The device callbacks lead with `WGPUDevice const*` rather than a status enum, so the parameter
+/// order differs from every other shape here. Spelling it out as its own type rather than reusing a
+/// similar-looking one is deliberate: these two are the pair that got missed twice.
+type FlatDeviceCb = unsafe extern "C" fn(*mut c_void, u32, *const c_char, u64, u64, u64);
 
 /// Callback slots, indexed by the selector JavaScript passes.
 ///
-/// Selectors: 0 requestAdapter · 1 requestDevice · 2 bufferMap · 3 popErrorScope · 4 queueWorkDone.
-const SLOT_COUNT: usize = 5;
+/// Selectors: 0 requestAdapter · 1 requestDevice · 2 bufferMap · 3 popErrorScope · 4 queueWorkDone ·
+/// 5 uncapturedError · 6 deviceLost.
+///
+/// The last two are installed in the `WGPUDeviceDescriptor` at device creation rather than handed to
+/// one of the seam's entry points, which is exactly why two separate sweeps for by-value callback
+/// hazards walked past them: they are not reached from `src/ffi/abiSeam.ts` at all. Their C
+/// prototypes take `WGPUStringView` by value like every other callback here, so they belong to the
+/// same problem regardless of how they are installed.
+const SLOT_COUNT: usize = 7;
 const SLOT_REQUEST_ADAPTER: u32 = 0;
 const SLOT_REQUEST_DEVICE: u32 = 1;
 const SLOT_BUFFER_MAP: u32 = 2;
 const SLOT_POP_ERROR_SCOPE: u32 = 3;
 const SLOT_QUEUE_WORK_DONE: u32 = 4;
+const SLOT_UNCAPTURED_ERROR: u32 = 5;
+const SLOT_DEVICE_LOST: u32 = 6;
 
 /// `AtomicPtr` rather than a `Mutex`: a trampoline runs inside wgpu-native's own call stack, often
 /// re-entrantly, and taking a lock there is how a deadlock gets built. A relaxed load of a pointer
 /// that is written once at startup is all this needs.
 static FLAT: [AtomicPtr<c_void>; SLOT_COUNT] = [
+    AtomicPtr::new(std::ptr::null_mut()),
+    AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
     AtomicPtr::new(std::ptr::null_mut()),
@@ -764,6 +781,40 @@ unsafe extern "C" fn tramp_queue_work_done(
     unsafe { f(status, data, len, userdata1 as u64, userdata2 as u64) }
 }
 
+/// `(WGPUDevice const*, WGPUErrorType, WGPUStringView, ud1, ud2)`
+unsafe extern "C" fn tramp_uncaptured_error(
+    device: *mut c_void,
+    error_type: u32,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_UNCAPTURED_ERROR);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatDeviceCb>(f) };
+    unsafe { f(device, error_type, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
+/// `(WGPUDevice const*, WGPUDeviceLostReason, WGPUStringView, ud1, ud2)`
+unsafe extern "C" fn tramp_device_lost(
+    device: *mut c_void,
+    reason: u32,
+    message: WGPUStringView,
+    userdata1: *mut c_void,
+    userdata2: *mut c_void,
+) {
+    let f = flat_slot(SLOT_DEVICE_LOST);
+    if f.is_null() {
+        return;
+    }
+    let (data, len) = split(message);
+    let f = unsafe { std::mem::transmute::<*mut c_void, FlatDeviceCb>(f) };
+    unsafe { f(device, reason, data, len, userdata1 as u64, userdata2 as u64) }
+}
+
 /// Register the flat JavaScript callback for `slot`.
 ///
 /// Returns `0` on success, `-1` for an unknown slot, `-2` for a null function pointer. Registering
@@ -800,6 +851,8 @@ pub extern "C" fn wgpu_bun_shim_trampoline(slot: u32) -> *mut c_void {
         SLOT_BUFFER_MAP => tramp_buffer_map as *const (),
         SLOT_POP_ERROR_SCOPE => tramp_pop_error_scope as *const (),
         SLOT_QUEUE_WORK_DONE => tramp_queue_work_done as *const (),
+        SLOT_UNCAPTURED_ERROR => tramp_uncaptured_error as *const (),
+        SLOT_DEVICE_LOST => tramp_device_lost as *const (),
         _ => return std::ptr::null_mut(),
     };
     f as *mut c_void

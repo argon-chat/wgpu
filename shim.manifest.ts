@@ -54,7 +54,7 @@ import { currentRid, platformOf, type IArchiveAsset, type Rid } from "./wgpu-nat
  * library and refuses a mismatch, because a silently different signature corrupts a stack rather
  * than raising an error.
  */
-export const SHIM_ABI_VERSION = 2;
+export const SHIM_ABI_VERSION = 3;
 
 /**
  * The shim crate's own release version — what names its published artefacts.
@@ -64,7 +64,7 @@ export const SHIM_ABI_VERSION = 2;
  * callback trampolines were added — a new exported surface, so `SHIM_ABI_VERSION` moved with it and
  * a 1.x artefact is refused at load rather than called with the wrong signatures.
  */
-export const SHIM_VERSION = "2.0.0";
+export const SHIM_VERSION = "3.0.0";
 
 /** Git tag the shim artefacts are published under. */
 export const SHIM_RELEASE_TAG = `shim-v${SHIM_VERSION}`;

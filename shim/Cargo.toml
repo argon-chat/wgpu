@@ -1,6 +1,6 @@
 [package]
 name = "wgpu-bun-shim"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2021"
 # 1.82 is where `unsafe extern` blocks stabilised. They are used below so that the one genuinely
 # unsafe thing here — declaring a foreign prototype — is marked as such rather than implied.

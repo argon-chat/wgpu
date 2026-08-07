@@ -175,6 +175,8 @@ describe("the Rust crate and the TypeScript seam describe the same shim", () => 
       BUFFER_MAP: CALLBACK_SLOTS.bufferMap,
       POP_ERROR_SCOPE: CALLBACK_SLOTS.popErrorScope,
       QUEUE_WORK_DONE: CALLBACK_SLOTS.queueWorkDone,
+      UNCAPTURED_ERROR: CALLBACK_SLOTS.uncapturedError,
+      DEVICE_LOST: CALLBACK_SLOTS.deviceLost,
     });
   });
 

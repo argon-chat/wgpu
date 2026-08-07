@@ -232,9 +232,16 @@ It gives JavaScript a flat surface in both directions:
 - **Going in** — the seven entry points re-exported with flat pointer parameters. Since every call
   site already hands over a pointer to an already-packed buffer, **the shim's signature is the
   signature the binding was already using**.
-- **Coming back** — five C trampolines carrying the real callback prototypes. They take the
+- **Coming back** — seven C trampolines carrying the real callback prototypes. They take the
   by-value `WGPUStringView`, split it, and forward `(data, length)` to a flat JavaScript function.
   What goes into `WGPUCallbackInfo.callback` is the trampoline's address, not a `bun:ffi` callback's.
+
+The seven are derived from the pinned header rather than collected by hand: nine callback typedefs
+in `webgpu.h` take a by-value `WGPUStringView`, seven are reachable, and the two that are not
+(`CreateComputePipelineAsync`, `CreateRenderPipelineAsync`) have entry points that abort on call
+and are already blocklisted. A test asserts that partition against the header, so an upstream
+release that adds a callback cannot slip past — see
+[Not being wrong a third time](#not-being-wrong-a-third-time).
 
 It resolves wgpu-native at runtime, by the exact absolute path the binding resolved, rather than
 linking it. That is not laziness: linking would risk a *second* wgpu-native instance in the process
@@ -394,38 +401,70 @@ has run. Both can be true; only one is evidence. Everything below is one or the 
 | The version-skew guard | a shim reporting the wrong flat-ABI version is refused at load, as `AbiUnsupportedError` |
 | The struct-layout oracle on `win32-x64` | all 115 aggregates, `sizeof`/`offsetof` from a real C compiler on the pinned headers |
 | **The shim compiles on all four platforms** | CI built and uploaded it on `win32-x64`, `linux-x64`, `linux-arm64` and `darwin-arm64` |
-| **That `linux-x64`, `linux-arm64` and `darwin-arm64` did NOT work** | all three hit the by-value callback defect; that is a measurement, and it is why the section below is shorter than it was |
+| **The trampoline fix, on `linux-x64`** | CI reached a real device — `llvmpipe / Mesa 25.2.8`, `seam: resolved=shim bound=shim`, 276 pass. The SysV path is no longer a claim |
+| **That the device-scoped callbacks were broken too** | the same run found `uncapturedError` / `deviceLost` failing on `linux-x64` and `linux-arm64` — a second site, same defect, since fixed |
+| The structural guard against a third site | mutation-tested: a stray `JSCallback`, an inline arg list, and an unbound header callback each make it fail |
 | Two of the forty abort-on-call symbols, by hand | `wgpuBufferWriteMappedRange` aborts; `wgpuBufferGetMappedRange` works |
 
 ### Argued, not executed
 
 | | Basis | What would settle it |
 |---|---|---|
-| **That the callback-trampoline fix works** on the three platforms it was written for | the defect is understood, the mechanism is proven on Win64, and the decoding is now a compiler's job on the target | one CI matrix run; this is now the single most load-bearing unexecuted claim here |
-| **The SysV calling sequence** for the 40-byte argument | the psABI classification rule, plus a real compiler emitting it | a `linux-x64` run |
-| AArch64 register assignment for both aggregate sizes | AAPCS: >16 B indirect, ≤16 B in up to two GPRs | an `arm64` run |
+| **That the device-callback fix works** on the three platforms it was written for | identical mechanism to the five callbacks already proven on `linux-x64`, and proven on Win64 on both seam paths | one CI matrix run; this is now the single most load-bearing unexecuted claim here |
+| AArch64 register assignment for both aggregate sizes | AAPCS: >16 B indirect, ≤16 B in up to two GPRs; `linux-arm64` behaved identically to `linux-x64` throughout, which is what the rule predicts | an `arm64` run that completes |
+| That a hosted macOS runner completes a device request | the `darwin-arm64` leg got as far as asking, so the stack initialises | a `darwin-arm64` run |
 | Struct layouts being identical on all four platforms | both headers use only fixed-width scalars, enums, pointers and `size_t` — no `long`, no bitfields, no arrays, so LLP64 and LP64 cannot diverge | the oracle running on the other three |
 | Whether the layout oracle's header-shadowing trick survives outside Windows | it has only ever run there | the same |
 | Thirty-eight of the forty abort-on-call symbols | upstream's Rust source at the pinned tag | the subprocess-per-symbol sweep (`bun run derive:aborts:probe`) |
-| That a hosted macOS runner exposes a usable Metal device | paravirtualised Metal is documented to exist; the `darwin-arm64` leg got as far as *asking* for an adapter, so the stack initialises | a `darwin-arm64` run that completes |
 
-### What the first matrix run actually taught
+### Not being wrong a third time
 
-Worth stating separately, because it is the most useful thing in this file for anyone extending the
-package: **three platforms failing identically is evidence about a shared rule, not about three
-platforms.** The failing set (`linux-x64`, `linux-arm64`, `darwin-arm64`) matched neither ABI group
-the package documented, which read as "therefore not an ABI problem". It was an ABI problem — it just
-belonged to a *different* aggregate, with a *different* rule, in the *opposite* direction. Whenever a
-failure set does not match your model's partitions, the model has the wrong partitions.
+The most useful paragraph in this file for anyone extending the package, because it caught two
+readers in a row:
+
+> **Two different aggregates in this API have two different rules that partition the platforms
+> differently.** A 40-byte `*CallbackInfo` *argument* goes by hidden reference on Win64 and AArch64
+> and on the stack under SysV — SysV is the outlier. A 16-byte `WGPUStringView` *callback parameter*
+> goes by hidden reference on Win64 and in two registers on both AArch64 and SysV — **Win64** is the
+> outlier.
+>
+> So **the set of failing platforms will not match the ABI grouping anyone expects.** Three
+> platforms failing identically read as evidence *against* an ABI cause, twice, because the failing
+> set matched neither documented group. Both times it was an ABI cause belonging to the other
+> aggregate. When a failure set does not match your model's partitions, the model has the wrong
+> partitions.
+
+It is worse than a subtle rule, because the failure is *silent by construction*. A shifted argument
+list means the correlation identifier arrives as half of the message; the lookup that uses it finds
+nothing and returns — which is a deliberate safety property, since a callback arriving after
+teardown must be harmless. **The safety property and the ABI defect are indistinguishable from
+inside.** The first occurrence presented as a hang; the second as a test observing zero events.
+
+Found by sweep twice, so a sweep is not the answer. `test/callback-abi.test.ts` replaces it with
+three checked properties:
+
+1. **The hazardous set is derived from the pinned header**, not from a maintained list. Every
+   callback typedef taking a by-value `WGPUStringView` must have a trampoline slot or a documented
+   exemption; an upstream addition fails the test.
+2. **Exactly one module in `src/` may construct a `JSCallback`** — the one that knows which seam
+   path is bound. Everything else registers a plain handler with no FFI types in it. A construction
+   site anywhere else fails the test.
+3. **Every argument shape is a named constant.** An inline argument list at a construction site is
+   exactly what both defects looked like; naming it forces the author to say which side of the ABI
+   question it falls on.
+
+All three were mutation-tested — each was made to fail deliberately before being trusted.
 
 ## Remaining gaps
 
 Ordered by what blocks a release.
 
-1. **Three of the four platforms have never passed.** The matrix has now run once: the shim built
-   everywhere, `win32-x64` went green on WARP, and the other three found the callback ABI defect
-   described under [The ABI seam](#the-abi-seam). That is fixed and unverified — the fix cannot be
-   executed from a Windows machine. Nothing should be published before a green matrix.
+1. **Three of the four platforms have not yet passed a full run.** Two matrix runs so far. The
+   first found the by-value callback defect on all three non-Windows platforms; the second
+   confirmed the fix — `linux-x64` reached a real `llvmpipe` device over the shim path — and found
+   the same defect at a second site, the device-scoped `uncapturedError` and `deviceLost`
+   callbacks. That is fixed and not yet re-measured, because it cannot be executed from a Windows
+   machine. Nothing should be published before a green matrix.
 2. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
    `bun run shim:fetch` refuses to install, by design. Until then the acquisition paths are
    `bun run shim:build` (needs cargo) or the platform npm package, which does not exist either.

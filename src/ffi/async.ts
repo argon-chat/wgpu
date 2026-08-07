@@ -175,6 +175,90 @@ const { ptr, u32, u64, void: v } = FFIType;
  *     `src/ffi/abiSeam.ts` now binds on **Win64 only** for precisely this reason.
  */
 
+/**
+ * ══ Every `JSCallback` in this package is constructed here ══
+ *
+ * Not a stylistic preference — a containment boundary. Choosing a callback's argument shape *is*
+ * answering an ABI question, and the question has been got wrong twice, both times at a site a
+ * previous sweep did not cover. The second pair (`uncapturedError`, `deviceLost`) lived in
+ * `src/api/device.ts` because that is where the state they need lives, and they were invisible to a
+ * search of the seam.
+ *
+ * So the state comes to the callback instead of the callback going to the state: modules register a
+ * **handler** — plain JavaScript, no FFI types, no ABI decisions — and this module owns the one
+ * place where a C signature is declared. `test/abi-seam.test.ts` asserts that `src/` contains no
+ * other `new JSCallback`, which is what makes "there is no third site" a checked property rather
+ * than a claim.
+ */
+
+/** A device-scoped native callback, after this module has decoded it. */
+export type DeviceCallbackHandler = (deviceId: number, code: number, message: string) => void;
+
+const deviceHandlers = new Map<"uncapturedError" | "deviceLost", DeviceCallbackHandler>();
+
+/**
+ * Register what to do when a device-scoped native callback arrives.
+ *
+ * Must be registered before a device is created, which is trivially true: `src/api/device.ts` does
+ * it at module scope, and nothing can create a device without importing that module.
+ */
+export function setDeviceCallbackHandler(
+  slot: "uncapturedError" | "deviceLost",
+  handler: DeviceCallbackHandler,
+): void {
+  deviceHandlers.set(slot, handler);
+}
+
+let unmatchedDeviceCallbacks = 0;
+
+/**
+ * Route a decoded device callback, and notice when it matches nothing.
+ *
+ * The `?.`-style miss is how the last ABI defect stayed invisible: an id that names no live device
+ * is *safe* — it must be, a callback can arrive after teardown — and safety here reads exactly like
+ * correctness. So the miss is counted and reported once. A handful after `destroy()` is ordinary;
+ * one on the very first uncaptured error is the signature of an argument shift, and that is the
+ * sentence worth having on stderr rather than reconstructing later.
+ *
+ * Never throws: this frame returns into Rust across a `nounwind` boundary, where an exception is
+ * undefined behaviour rather than a stack trace.
+ */
+function routeDeviceCallback(
+  slot: "uncapturedError" | "deviceLost",
+  deviceId: number,
+  code: number,
+  message: string,
+): void {
+  try {
+    const handler = deviceHandlers.get(slot);
+    if (!handler) return;
+    handler(deviceId, code, message);
+  } catch {
+    /* swallowed on purpose — see above */
+  }
+}
+
+/** Count a device callback that named no live device, and say so the first time. */
+export function noteUnmatchedDeviceCallback(slot: string, deviceId: number): void {
+  unmatchedDeviceCallbacks++;
+  if (unmatchedDeviceCallbacks !== 1) return;
+  console.error(
+    `wgpu-bun: a ${slot} callback named device id ${deviceId}, which is not live.
+` +
+      `  After device.destroy() that is ordinary. Before it, it means the callback's arguments were
+` +
+      `  decoded under the wrong ABI rule — the id is being read out of a neighbouring register — and
+` +
+      `  the error it carried has been lost. Check the seam: ${JSON.stringify(seamStatus().mode)} bound, ` +
+      `${boundMode() ?? "(not bound)"}.`,
+  );
+}
+
+/** How many device callbacks named no live device. Diagnostics only. */
+export function unmatchedDeviceCallbackCount(): number {
+  return unmatchedDeviceCallbacks;
+}
+
 /** Flat: `(status, handle, msgData, msgLen, ud1, ud2)` — correct on every ABI, via the shim. */
 const FLAT_ARGS_HANDLE = [u32, ptr, ptr, u64, u64, u64] as const;
 /** Flat: `(status, msgData, msgLen, ud1, ud2)`. */
@@ -188,6 +272,10 @@ const PTR_ARGS_HANDLE = [u32, ptr, ptr, u64, u64] as const;
 const PTR_ARGS_STATUS = [u32, ptr, u64, u64] as const;
 /** Pointer form: `(status, errorType, StringView*, ud1, ud2)` — Win64 only. */
 const PTR_ARGS_ERROR_SCOPE = [u32, u32, ptr, u64, u64] as const;
+/** Flat: `(device*, code, msgData, msgLen, ud1, ud2)` — the device-scoped pair. */
+const FLAT_ARGS_DEVICE = [ptr, u32, ptr, u64, u64, u64] as const;
+/** Pointer form: `(device*, code, StringView*, ud1, ud2)` — Win64 only. */
+const PTR_ARGS_DEVICE = [ptr, u32, ptr, u64, u64] as const;
 
 /**
  * The flat callbacks, matching the shim's trampoline prototypes.
@@ -239,6 +327,18 @@ const FLAT_FORM: Record<CallbackSlot, () => JSCallback> = {
         dispatch<IStatusResult>(Number(ud1), { status, message: decodeStringParts(data, len) }),
       { args: FLAT_ARGS_STATUS, returns: v },
     ),
+  uncapturedError: () =>
+    new JSCallback(
+      (_device: number, errorType: number, data: number, len: bigint, ud1: bigint) =>
+        routeDeviceCallback("uncapturedError", Number(ud1), errorType, decodeStringParts(data, len)),
+      { args: FLAT_ARGS_DEVICE, returns: v },
+    ),
+  deviceLost: () =>
+    new JSCallback(
+      (_device: number, reason: number, data: number, len: bigint, ud1: bigint) =>
+        routeDeviceCallback("deviceLost", Number(ud1), reason, decodeStringParts(data, len)),
+      { args: FLAT_ARGS_DEVICE, returns: v },
+    ),
 };
 
 /** The pointer-form callbacks. Correct on Win64, which is the only place the seam binds `direct`. */
@@ -280,6 +380,18 @@ const POINTER_FORM: Record<CallbackSlot, () => JSCallback> = {
       (status: number, message: number, ud1: bigint) =>
         dispatch<IStatusResult>(Number(ud1), { status, message: readStringView(message) }),
       { args: PTR_ARGS_STATUS, returns: v },
+    ),
+  uncapturedError: () =>
+    new JSCallback(
+      (_device: number, errorType: number, message: number, ud1: bigint) =>
+        routeDeviceCallback("uncapturedError", Number(ud1), errorType, readStringView(message)),
+      { args: PTR_ARGS_DEVICE, returns: v },
+    ),
+  deviceLost: () =>
+    new JSCallback(
+      (_device: number, reason: number, message: number, ud1: bigint) =>
+        routeDeviceCallback("deviceLost", Number(ud1), reason, readStringView(message)),
+      { args: PTR_ARGS_DEVICE, returns: v },
     ),
 };
 
