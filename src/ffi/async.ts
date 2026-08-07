@@ -57,13 +57,21 @@
  *
  * {@link settle} therefore makes the guarantee structural rather than remembered:
  *
- * > **An async result is produced only by its native callback.** There is no timeout path, no
- * > iteration cap, no default value, no "resolve as success if nothing arrived". If the callback
- * > has not fired, the operation has not completed, and the promise stays pending.
+ * > **An async result is produced only by its native callback.** No default value, no sentinel, no
+ * > "resolve as success if nothing arrived". If the callback has not fired, the operation has not
+ * > completed. `popErrorScope()` goes through `settle()` like everything else, so it cannot
+ * > physically resolve before wgpu-native has delivered its verdict.
  *
- * The designed failure mode is a **hang**, which a test runner's timeout catches and a human
- * notices. `popErrorScope()` goes through `settle()` like everything else, so it cannot physically
- * resolve before wgpu-native has delivered its verdict.
+ * There **is** a deadline, and the distinction it rests on is worth stating precisely: after it
+ * expires `settle` *throws*, it does not resolve. The guarantee above is about never inventing an
+ * answer, and a thrown error invents nothing — refusing to answer and answering wrongly are
+ * different acts, and only the second was ever the thing to protect against.
+ *
+ * An earlier revision had no deadline, on the reasoning that a hang is the honest failure and a test
+ * runner's timeout would catch it. That reasoning did not survive contact: the first CI run to reach
+ * this code on AArch64 sat inside `requestAdapter` until the job's own limit, produced no diagnosis,
+ * and burned a runner. A hang does not say *which* call stalled, and on an unattended machine it is
+ * indistinguishable from slow work.
  *
  * ══ 3. One `JSCallback` per signature, for the life of the process ══
  *
@@ -274,8 +282,10 @@ export async function settle<T>(pump: () => void, begin: (ticket: Ticket) => voi
           `(${spin + 1} pump turns on ${process.platform}-${process.arch}).\n` +
           `  The operation was issued and its callback never fired. wgpu-native delivers only on\n` +
           `  poll, so this is either a driver/adapter that never answers, or a call whose argument\n` +
-          `  passing is wrong for this ABI — the latter is expected wherever src/ffi/abiSeam.ts\n` +
-          `  reports that it cannot express by-value aggregates.`,
+          `  passing is wrong for this ABI. The second should now be unreachable — src/ffi/abiSeam.ts\n` +
+          `  refuses outright rather than issuing a call it cannot express — so if it IS the cause,\n` +
+          `  the seam bound a path it should not have. Check seamStatus() and seamBoundMode() before\n` +
+          `  looking at the driver.`,
       );
     }
   }

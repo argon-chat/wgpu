@@ -5,8 +5,9 @@
  * the pinned headers and verified against a real C compiler, and passed by pointer, which is what
  * `bun:ffi` does natively. The one place C's calling convention cannot be expressed in JavaScript —
  * the handful of entry points taking an aggregate **by value** — is isolated in
- * {@link ./ffi/abiSeam.ts}, which refuses to run rather than silently corrupt where a pointer is
- * not a valid stand-in.
+ * {@link ./ffi/abiSeam.ts}, which buys the calling sequence from a compiled shim, falls back to the
+ * direct path only where the ABI provably permits it, and refuses to run rather than silently
+ * corrupt where a pointer is not a valid stand-in and no shim is installed.
  *
  * What is genuinely not implemented is listed on {@link NotImplementedError}: surface presentation,
  * render bundles, indirect draw, occlusion queries and external textures — four coherent

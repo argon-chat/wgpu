@@ -28,9 +28,14 @@
  *     bun run scripts/release-platform-packages.ts --rid linux-x64  # stage one
  *     bun run scripts/release-platform-packages.ts --wire           # write optionalDependencies
  *
- * Staging a RID requires its library to be present under `vendor/<rid>/`, which is what
- * `bun run fetch --rid <rid>` produces. Cross-fetching all five from one machine works, so a release
- * does not need five machines.
+ * Staging a RID requires **two** libraries under `vendor/<rid>/lib/`: upstream's wgpu-native, from
+ * `bun run fetch --rid <rid>`, and this project's ABI shim, from `bun run shim:build --rid <rid>`.
+ *
+ * Those two have different portability. wgpu-native cross-fetches happily — it is a file download,
+ * so one machine can stage every platform. The shim is compiled here, and cross-linking a `cdylib`
+ * for four targets from one host means four target toolchains; the release workflow instead builds
+ * each on its matching runner and collects the artefacts. So a release does need four machines, for
+ * exactly one of the two artefacts.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -43,6 +48,7 @@ import {
   WGPU_NATIVE_TAG,
   type Rid,
 } from "../wgpu-native.manifest.ts";
+import { SHIM_VERSION, shimFileNameFor, shimIsRequired } from "../shim.manifest.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(PKG_ROOT, "vendor");
@@ -95,7 +101,7 @@ export function platformPackageManifest(
   const manifest: Record<string, unknown> = {
     name: platformPackageName(rid),
     version,
-    description: `wgpu-native ${WGPU_NATIVE_TAG} shared library for ${rid}. Installed automatically by wgpu-bun.`,
+    description: `wgpu-native ${WGPU_NATIVE_TAG} and the wgpu-bun ABI shim ${SHIM_VERSION} for ${rid}. Installed automatically by wgpu-bun.`,
     // The package is almost entirely someone else's binary, so the SPDX expression is wgpu-native's
     // dual licence, not this repository's. Declaring MIT alone would understate the terms a consumer
     // is actually accepting.
@@ -107,7 +113,7 @@ export function platformPackageManifest(
       "./include/*": "./include/*",
       "./package.json": "./package.json",
     },
-    files: ["lib", "include", ".version", "README.md", UPSTREAM_LICENSE_FILE],
+    files: ["lib", "include", ".version", ".shim-version", "README.md", UPSTREAM_LICENSE_FILE],
   };
   // Never fabricated: an incorrect `repository.url` breaks npm trusted publishing with an
   // authorization error that names nothing useful, so absent is strictly better than guessed.
@@ -127,14 +133,21 @@ function platformReadme(rid: Rid): string {
   return [
     `# ${platformPackageName(rid)}`,
     "",
-    `The [wgpu-native](https://github.com/gfx-rs/wgpu-native) \`${WGPU_NATIVE_TAG}\` shared library for \`${rid}\`.`,
+    `Two shared libraries for \`${rid}\`:`,
+    "",
+    `- \`lib/${libFileName(platformOf(rid))}\` — [wgpu-native](https://github.com/gfx-rs/wgpu-native) \`${WGPU_NATIVE_TAG}\`,`,
+    "  upstream's own release artifact, unmodified. Dual-licensed MIT / Apache-2.0 by the gfx-rs",
+    "  project; see `LICENSE-WGPU-NATIVE`.",
+    `- \`lib/${shimFileNameFor(rid)}\` — the \`wgpu-bun\` ABI shim \`${SHIM_VERSION}\`, MIT, built from`,
+    "  the `wgpu-bun` repository. It supplies the calling sequence `bun:ffi` cannot express for the",
+    "  handful of wgpu-native entry points that take a C aggregate by value.",
+    "",
+    "They ship together because the shim transcribes one wgpu-native generation's struct layouts and",
+    "is only correct paired with it.",
     "",
     "You do not install this directly. It is an `optionalDependency` of",
     "[`wgpu-bun`](https://www.npmjs.com/package/wgpu-bun) and your package manager picks the one",
     "matching your platform via the `os` and `cpu` fields.",
-    "",
-    "The binary is upstream's own release artifact, unmodified. wgpu-native is dual-licensed",
-    "MIT / Apache-2.0 by the gfx-rs project.",
     "",
   ].join("\n");
 }
@@ -155,12 +168,30 @@ function stage(rid: Rid, version: string, repositoryUrl: string | null): IStageR
     return { rid, staged: false, reason: `vendor/${rid}/lib/${libName} is missing — run: bun run fetch --rid ${rid}` };
   }
 
+  // The ABI shim rides in the SAME package as wgpu-native, not in one of its own. That is what makes
+  // the two impossible to separate: a shim transcribes one wgpu-native generation's struct layouts,
+  // so a consumer who ended up with a shim from one release and a library from another would hit
+  // version skew — which the seam does refuse at load, but refusing is worse than never being able
+  // to get there. One tarball, one version, one `os`/`cpu` match.
+  const shimName = shimFileNameFor(rid);
+  const srcShim = path.join(srcDir, "lib", shimName);
+  if (!fs.existsSync(srcShim)) {
+    return {
+      rid,
+      staged: false,
+      reason: `vendor/${rid}/lib/${shimName} is missing — run: bun run shim:build --rid ${rid} (or shim:fetch)`,
+    };
+  }
+
   const outDir = path.join(STAGE_DIR, rid);
   fs.rmSync(outDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(outDir, "lib"), { recursive: true });
   fs.mkdirSync(path.join(outDir, "include"), { recursive: true });
 
   fs.copyFileSync(srcLib, path.join(outDir, "lib", libName));
+  fs.copyFileSync(srcShim, path.join(outDir, "lib", shimName));
+  const shimStamp = path.join(srcDir, ".shim-version");
+  if (fs.existsSync(shimStamp)) fs.copyFileSync(shimStamp, path.join(outDir, ".shim-version"));
   const incDir = path.join(srcDir, "include");
   if (fs.existsSync(incDir)) {
     for (const header of fs.readdirSync(incDir)) {
@@ -203,7 +234,7 @@ function main(argv: string[]): void {
 
   if (argv.includes("--wire")) {
     // Writing the block is a release action, not a repo default. Until the platform packages exist
-    // on npm, declaring them would mean every `bun install` tries to resolve five 404s.
+    // on npm, declaring them would mean every `bun install` tries to resolve four 404s.
     const next = { ...rootPkg, optionalDependencies: optionalDependenciesFor(version, rids) };
     fs.writeFileSync(rootPkgPath, `${JSON.stringify(next, null, 2)}\n`);
     console.log(`wired optionalDependencies for ${rids.length} platform(s) at ${version}`);
@@ -246,6 +277,23 @@ function main(argv: string[]): void {
     for (const rid of rids) {
       const libPath = path.join(VENDOR_DIR, rid, "lib", libFileName(platformOf(rid)));
       if (!fs.existsSync(libPath)) problems.push(`${rid}: not fetched (bun run fetch --rid ${rid})`);
+      const shimPath = path.join(VENDOR_DIR, rid, "lib", shimFileNameFor(rid));
+      if (!fs.existsSync(shimPath)) {
+        // A release without the shim is not a partial release. On a SysV host the package simply
+        // does not run; everywhere else it silently takes the fallback path, so what ships is not
+        // what CI exercised. Both are blockers, and saying which one applies is the difference
+        // between an actionable message and a chore.
+        const [platform, arch] = rid.split("-");
+        problems.push(
+          `${rid}: no ABI shim (bun run shim:build --rid ${rid}).\n` +
+            (shimIsRequired(platform!, arch!)
+              ? `    This ABI cannot express a by-value aggregate from bun:ffi, so without the shim\n` +
+                `    the package refuses to run on ${rid} at all.`
+              : `    This ABI can take the direct path, so it would still work — but it would then be\n` +
+                `    running a different calling path from the one CI exercised, which is not what\n` +
+                `    "tested" means.`),
+        );
+      }
     }
     if (problems.length) {
       console.error(`\nrelease preflight FAILED:\n\n  - ${problems.join("\n  - ")}\n`);

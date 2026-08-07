@@ -1,0 +1,28 @@
+[package]
+name = "wgpu-bun-shim"
+version = "1.0.0"
+edition = "2021"
+# 1.82 is where `unsafe extern` blocks stabilised. They are used below so that the one genuinely
+# unsafe thing here — declaring a foreign prototype — is marked as such rather than implied.
+rust-version = "1.82"
+license = "MIT"
+description = "Flat-C-ABI shim over wgpu-native's by-value callback-info entry points, for wgpu-bun."
+publish = false
+
+# A `cdylib` and nothing else. There is no Rust consumer of this crate — its only caller is a
+# `dlopen` from JavaScript — so an `rlib` would be dead weight in every build.
+[lib]
+name = "wgpu_bun_shim"
+crate-type = ["cdylib"]
+
+# No dependencies, deliberately. Everything this crate needs (`c_void`, `dlopen`, `LoadLibraryW`) is
+# reachable from `core::ffi` and `std`, and a supply-chain-sensitive package should not grow a
+# transitive dependency tree to declare seven function pointers.
+[dependencies]
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"  # nothing here can unwind across the C boundary; make that structural, not hoped-for
+strip = "debuginfo"

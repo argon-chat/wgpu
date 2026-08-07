@@ -10,24 +10,52 @@
  *
  * So the reasons a device might be missing are separated, and each gets an explicit policy:
  *
- * | Reason          | Default        | Escape hatch                    |
- * |-----------------|----------------|---------------------------------|
- * | `no-library`    | **hard fail**  | `WGPU_BUN_ALLOW_NO_LIBRARY=1`   |
- * | `unimplemented` | skip           | none — see below                |
- * | `no-adapter`    | **hard fail**  | `WGPU_BUN_ALLOW_NO_ADAPTER=1`   |
- * | `no-device`     | **hard fail**  | none                            |
+ * | Reason           | Default        | Escape hatch                       |
+ * |------------------|----------------|------------------------------------|
+ * | `no-library`     | **hard fail**  | `WGPU_BUN_ALLOW_NO_LIBRARY=1`      |
+ * | `unimplemented`  | skip           | none — see below                   |
+ * | `abi-unsupported`| skip *if no shim is installed* | none — see below  |
+ * | `no-adapter`     | **hard fail**  | `WGPU_BUN_ALLOW_NO_ADAPTER=1`      |
+ * | `no-device`      | **hard fail**  | none                               |
  *
  * `unimplemented` skips because the binding legitimately does not exist yet, and a permanently red
  * suite trains people to ignore it. That would be a loophole — "never implement it and the tests
- * never run" — except that `status.test.ts` binds the package's public claims to the same flag: while
- * `IMPLEMENTED` is false the README must say so and the version must stay `0.0.x`. The escape from
- * the skip is not a knob, it is shipping.
+ * never run" — except that `environment.test.ts` binds the package's public claims to the same flag:
+ * while `IMPLEMENTED` is false the README must say so and the version must stay `0.0.x`. The escape
+ * from the skip is not a knob, it is shipping.
+ *
+ * ── `abi-unsupported`, and the misclassification it exists to end ───────────────────────────────
+ *
+ * `bun:ffi` cannot express a by-value C aggregate, and under the SysV x86-64 ABI seven wgpu-native
+ * entry points need exactly that. Where no compiled shim is installed, the binding **refuses to
+ * run** rather than corrupt a stack (see `src/ffi/abiSeam.ts`).
+ *
+ * That refusal used to arrive as `requestAdapter() threw`, which this file filed under
+ * **`no-adapter`** — a diagnosis meaning "this host has no GPU". On the `linux-x64` CI leg it was
+ * flatly untrue: `vulkaninfo` on that same runner reports `llvmpipe (LLVM 20.1.2) /
+ * DRIVER_ID_MESA_LLVMPIPE`, so the software adapter was installed and visible the whole time. The
+ * gate sent a reader looking for a driver problem that did not exist. A binding declining an ABI it
+ * cannot express and a machine with no GPU are different facts and now have different names.
+ *
+ * Its policy follows the same shape as `unimplemented`, and for the same reason: the escape is
+ * shipping, not a knob. It is a permitted skip **only while no shim is installed for this host**. If
+ * a shim *is* installed and the seam still refused, that is a defect — a shim that failed to load,
+ * or a version-skew rejection — and it hard-fails. So the kind stops being reachable the moment the
+ * artefact lands, mechanically rather than by anyone remembering to delete it.
  *
  * `no-adapter` is the one CI actually needs, because hosted runners vary. It is an env var rather
  * than auto-detection so that granting it is a visible, per-job decision in the workflow file, and
  * every skip it causes is announced on stderr and as a GitHub annotation.
  */
-import { create, globals, IMPLEMENTED, NotImplementedError } from "../../src/index.ts";
+import {
+  AbiUnsupportedError,
+  create,
+  globals,
+  IMPLEMENTED,
+  NotImplementedError,
+  seamStatus,
+  type ISeamStatus,
+} from "../../src/index.ts";
 import { missingLibraryMessage, nativeLibrary } from "./native.ts";
 
 // Exactly what a real consumer writes, and for the same reason: `GPUBufferUsage`, `GPUTextureUsage`,
@@ -47,6 +75,12 @@ export type GpuGate =
   | { readonly kind: "no-library"; readonly detail: string }
   /** `create()` threw `NotImplementedError` — the binding is still a stub. */
   | { readonly kind: "unimplemented"; readonly detail: string }
+  /**
+   * The binding refused to run on this ABI, because `bun:ffi` cannot express a by-value aggregate
+   * here and no compiled shim is installed. **Not** a statement about the GPU: the host may have a
+   * perfectly good adapter, and on the `linux-x64` CI runner it does.
+   */
+  | { readonly kind: "abi-unsupported"; readonly detail: string }
   /** The binding works but the host exposes no adapter (headless CI without a software rasteriser). */
   | { readonly kind: "no-adapter"; readonly detail: string }
   /** An adapter exists but `requestDevice` failed. Never acceptable — it means a real defect. */
@@ -55,6 +89,15 @@ export type GpuGate =
 const ALLOW_NO_ADAPTER = process.env["WGPU_BUN_ALLOW_NO_ADAPTER"] === "1";
 const ALLOW_NO_LIBRARY = process.env["WGPU_BUN_ALLOW_NO_LIBRARY"] === "1";
 const IN_GITHUB_ACTIONS = process.env["GITHUB_ACTIONS"] === "true";
+
+/**
+ * The seam's verdict, read once.
+ *
+ * `SEAM.shim` is the escape-hatch-shaped part of the `abi-unsupported` policy, and it is a fact
+ * about the filesystem rather than an env var on purpose: there is nothing a reviewer would want to
+ * grant here. Either the artefact that makes the ABI expressible is installed, or it is not.
+ */
+const SEAM = seamStatus();
 
 function annotate(level: "warning" | "error", message: string): void {
   const oneLine = message.replace(/\n/g, " · ");
@@ -73,6 +116,7 @@ async function acquire(): Promise<GpuGate> {
     // here means every GPU test exercises that tolerance for free.
     gpu = create([], "") as GPU;
   } catch (err) {
+    if (err instanceof AbiUnsupportedError) return { kind: "abi-unsupported", detail: err.message };
     if (err instanceof NotImplementedError) return { kind: "unimplemented", detail: err.message };
     throw err;
   }
@@ -82,6 +126,14 @@ async function acquire(): Promise<GpuGate> {
   try {
     adapter = await gpu.requestAdapter();
   } catch (err) {
+    // Order matters, and this is the whole point of the kind. The seam's refusal reaches us as a
+    // throw from `requestAdapter`, which is exactly where a genuine driver failure also lands — so
+    // whichever branch is tested first is the diagnosis the reader gets. Classifying by error type
+    // rather than by call site is what stops "this binding will not run here" from being reported as
+    // "this machine has no GPU".
+    if (err instanceof AbiUnsupportedError) {
+      return { kind: "abi-unsupported", detail: (err as Error).message };
+    }
     return { kind: "no-adapter", detail: `requestAdapter() threw: ${(err as Error).message}` };
   }
   if (!adapter) {
@@ -126,6 +178,14 @@ if (gate.kind === "ready") {
   console.error(`wgpu-bun: GPU ready — ${gate.adapterLabel}`);
 } else if (gate.kind === "unimplemented") {
   console.error(`wgpu-bun: GPU suites SKIPPED — the binding is not implemented yet (IMPLEMENTED=${IMPLEMENTED}).`);
+} else if (gate.kind === "abi-unsupported" && !SEAM.shim) {
+  annotate(
+    "warning",
+    `GPU suites SKIPPED — this ABI needs the compiled shim and none is installed.\n` +
+      `This is NOT a statement about the GPU on this host; the adapter, if any, was never asked for.\n` +
+      `Install it with \`bun run shim:fetch\` (pinned prebuilt) or \`bun run shim:build\` (needs cargo).\n` +
+      `${SEAM.reason}`,
+  );
 } else if (gate.kind === "no-adapter" && ALLOW_NO_ADAPTER) {
   annotate("warning", `GPU suites SKIPPED — no adapter, permitted by WGPU_BUN_ALLOW_NO_ADAPTER=1.\n${gate.detail}`);
 } else if (gate.kind === "no-library" && ALLOW_NO_LIBRARY) {
@@ -140,12 +200,22 @@ if (gate.kind === "ready") {
  * `environment.test.ts` turns a non-permitted skip into a failing test, which is what stops an
  * un-runnable environment from reading as a passing one.
  */
-export function skipIsPermitted(g: GpuGate = gate): boolean {
+export function skipIsPermitted(g: GpuGate = gate, seam: ISeamStatus = SEAM): boolean {
   switch (g.kind) {
     case "ready":
       return true;
     case "unimplemented":
       return !IMPLEMENTED;
+    case "abi-unsupported":
+      // Permitted only while there is no shim for this host. Once one is installed the seam cannot
+      // legitimately refuse, so a refusal means the shim failed to load or was rejected for version
+      // skew — a defect, and it must go red. No env var: granting "run without the thing that makes
+      // it correct" is not a decision anyone should be able to make.
+      //
+      // `seam` is a parameter rather than only a module constant so this branch can be exercised for
+      // both answers on one machine. A policy that can only ever be observed in the state the host
+      // happens to be in is a policy nobody has tested.
+      return seam.shim === null;
     case "no-adapter":
       return ALLOW_NO_ADAPTER;
     case "no-library":

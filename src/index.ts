@@ -35,14 +35,31 @@ import type { GPUEntryPoint } from "./types.ts";
 export {
   LIB_ENV_VAR,
   NPM_SCOPE,
+  SHIM_ENV_VAR,
   resolveNativeLibrary,
   tryResolveNativeLibrary,
+  tryResolveShimLibrary,
 } from "./resolve.ts";
 export { NotImplementedError, createInstance } from "./binding.ts";
 export { globals, installNavigatorGpu } from "./globals.ts";
 export { nativeLibrary, nativeVersion, type INativeVersion } from "./ffi/library.ts";
 export { UNIMPLEMENTED, isUnimplemented } from "./ffi/unimplemented.ts";
-export { BY_VALUE_CALLBACK_INFO_FUNCTIONS, BY_VALUE_FUNCTIONS } from "./ffi/abiSeam.ts";
+export {
+  AbiUnsupportedError,
+  BY_VALUE_CALLBACK_INFO_FUNCTIONS,
+  BY_VALUE_FUNCTIONS,
+  seamBoundMode,
+  seamStatus,
+  type ISeamStatus,
+  type SeamMode,
+} from "./ffi/abiSeam.ts";
+export {
+  SHIM_ABI_VERSION,
+  SHIM_VERSION,
+  abiExpressesByValueAggregates,
+  shimFileName,
+  shimIsRequired,
+} from "../shim.manifest.ts";
 export type {
   CreateOptions,
   GPUEntryPoint,

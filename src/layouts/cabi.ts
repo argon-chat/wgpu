@@ -95,7 +95,7 @@ export interface ICAbiModel {
  *
  * Every supported RID — `win32-x64`, `linux-x64`, `linux-arm64`, `darwin-arm64` —
  * lands here. Win64 (LLP64) and the Unix targets (LP64) differ only in `sizeof(long)`, and no member
- * of either header is a `long`, so the resulting layouts are **identical across all five**. See
+ * of either header is a `long`, so the resulting layouts are **identical across all four**. See
  * {@link assertHost64Bit} for what happens on anything else.
  */
 export const ABI_64: ICAbiModel = {

@@ -14,11 +14,15 @@
 #      pinned headers and checks 115 aggregates with `sizeof`/`offsetof` — compile-time, no linking,
 #      no device. The abort-symbol blocklist reads the export table. Packaging and manifest checks
 #      read files. A GPU-less runner still has real work to fail at.
+#      Each leg also **builds the ABI shim for its own platform** (`shim/`, a Rust cdylib) rather
+#      than cross-compiling four targets from one runner. The matrix already has exactly the four
+#      runners the four supported RIDs need, so native builds are free and the cross-linker problem
+#      never arises. It also means the shim binary a leg tests is the one that leg produced.
 #   2. **A missing adapter must be permitted explicitly, per leg**, via `WGPU_BUN_ALLOW_NO_ADAPTER`.
 #      Where it is granted, the reason is in the matrix entry next to it. Where it is not, the run
 #      fails.
 #   3. **The run as a whole insists that some leg really ran the GPU tests.** `gpu-coverage` reads
-#      one marker per leg and fails if none of them reached a device. Five individually-defensible
+#      one marker per leg and fails if none of them reached a device. Four individually-defensible
 #      skips must not add up to a meaningless pass.
 #
 # ── Software adapters ───────────────────────────────────────────────────────────────────────────
@@ -53,7 +57,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # ── Cheap, host-independent checks. Fails the run before five legs spend time on it. ───────────
+  # ── Cheap, host-independent checks. Fails the run before four legs spend time on it. ───────────
   static:
     name: typecheck + upstream pin
     runs-on: ubuntu-latest
@@ -70,6 +74,14 @@ jobs:
         # only be re-derived from upstream's Rust source. That needs network, which is why it is a
         # job of its own rather than part of the offline suite.
         run: bun run derive:aborts:source -- --check
+
+      - name: Shim crate unit tests
+        # Cheap and host-independent: the crate's own assertions about `size_of` and member offsets
+        # for the aggregates it declares. They are the compiler's view of the same C types the
+        # package derives from the headers, so a disagreement means one of the two is wrong — worth
+        # finding before four legs spend twenty minutes each.
+        working-directory: shim
+        run: cargo test
 
   test:
     name: ${{ matrix.rid }}
@@ -90,6 +102,13 @@ jobs:
             runner: ubuntu-latest
             # lavapipe is a real, installable adapter here. No excuse is granted: if it does not
             # come up, that is a finding and the leg should go red.
+            #
+            # This is also the ONE leg whose ABI needs the compiled shim, and it is the leg that
+            # previously reported `no-adapter` — which was false. `vulkaninfo` on this runner shows
+            # `llvmpipe (LLVM 20.1.2) / DRIVER_ID_MESA_LLVMPIPE`: the adapter was there the whole
+            # time, and what actually happened was the seam refusing an ABI it could not express.
+            # The gate now separates those two facts (`abi-unsupported`), and the shim build step
+            # below is what makes the refusal unreachable rather than merely well-labelled.
             allow_no_adapter: "0"
           - rid: linux-arm64
             runner: ubuntu-24.04-arm # free for public repositories; unavailable in private ones
@@ -125,6 +144,26 @@ jobs:
         # Pinned by URL + sha256; a mismatch hard-fails here rather than surfacing as a strange
         # runtime error later.
         run: bun run fetch
+
+      - name: Build the ABI shim for this platform
+        # Native, on the runner that matches the RID — no cross-compilation, no target linkers.
+        # It lands in `vendor/<rid>/lib/`, the same tier the fetched wgpu-native uses, so the seam
+        # picks it up with no configuration.
+        #
+        # Built on EVERY leg, not only on linux-x64 where the ABI requires it. That is the point of
+        # the decision recorded in shim.manifest.ts: the code that will run on the platform nobody
+        # can debug interactively is the same code every other leg just executed against a real
+        # device. A SysV-only shim would have its first and only run on its hardest platform.
+        run: bun run shim:build
+
+      - name: Upload the shim artefact
+        # Kept for the release workflow to consume, and for anyone bisecting a platform they cannot
+        # build for.
+        uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.rid }}
+          path: vendor/${{ matrix.rid }}/lib/*wgpu_bun_shim*
+          if-no-files-found: error
 
       - name: Check generated struct layouts against the fetched headers
         # Ordering matters and is enforced by the oracle itself: it compares the headers' sha256
@@ -162,7 +201,7 @@ jobs:
           path: gpu-markers/${{ matrix.rid }}.json
           if-no-files-found: warn
 
-  # ── The aggregate gate. Five defensible skips must not add up to a meaningless pass. ───────────
+  # ── The aggregate gate. Four defensible skips must not add up to a meaningless pass. ───────────
   gpu-coverage:
     name: at least one leg ran on a real device
     runs-on: ubuntu-latest
@@ -181,29 +220,47 @@ jobs:
           set -euo pipefail
           echo "## GPU coverage" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo "| platform | GPU suites | adapter |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| platform | GPU suites | seam | adapter |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|---|---|---|---|" >> "$GITHUB_STEP_SUMMARY"
 
           ready=0
           total=0
           unimplemented=0
+          abi=0
           shopt -s nullglob
           for f in markers/*.json; do
             total=$((total+1))
             gate=$(grep -o '"gate": *"[^"]*"' "$f" | cut -d'"' -f4)
             plat=$(grep -o '"platform": *"[^"]*"' "$f" | cut -d'"' -f4)
             adapter=$(grep -o '"adapter": *"[^"]*"' "$f" | cut -d'"' -f4 || true)
+            seam=$(grep -o '"seam": *"[^"]*"' "$f" | cut -d'"' -f4 || true)
             case "$gate" in
               ready)
                 ready=$((ready+1))
-                echo "| \`$plat\` | ran | ${adapter:-?} |" >> "$GITHUB_STEP_SUMMARY" ;;
+                echo "| \`$plat\` | ran | ${seam:-?} | ${adapter:-?} |" >> "$GITHUB_STEP_SUMMARY" ;;
               unimplemented)
                 unimplemented=$((unimplemented+1))
-                echo "| \`$plat\` | n/a (binding unimplemented) | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+                echo "| \`$plat\` | n/a (binding unimplemented) | — | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+              abi-unsupported)
+                # NOT a statement about the GPU. The binding declined an ABI it cannot express
+                # without the compiled shim; the adapter was never asked for. Rendered distinctly
+                # because reading this as "no GPU here" is exactly the mistake that cost time.
+                abi=$((abi+1))
+                echo "| \`$plat\` | **skipped** (ABI needs the shim; GPU not consulted) | refuse | n/a |" \
+                  >> "$GITHUB_STEP_SUMMARY" ;;
               *)
-                echo "| \`$plat\` | **skipped** ($gate) | — |" >> "$GITHUB_STEP_SUMMARY" ;;
+                echo "| \`$plat\` | **skipped** ($gate) | ${seam:-?} | — |" >> "$GITHUB_STEP_SUMMARY" ;;
             esac
           done
+
+          if [ "$abi" -gt 0 ]; then
+            # The shim is built on every leg, so reaching this means the build step did not produce
+            # one, or the seam rejected it. Either is a finding — surfaced as a warning here and as
+            # a hard test failure on the leg itself, because `skipIsPermitted` only tolerates
+            # `abi-unsupported` while NO shim is installed.
+            echo "::warning title=wgpu-bun::$abi leg(s) refused on ABI grounds despite the shim \
+          build step. Check that step's log before reading anything into the adapter column."
+          fi
 
           if [ "$total" -eq 0 ]; then
             # No markers at all means the matrix did not run, which must never read as coverage.

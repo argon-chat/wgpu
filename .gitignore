@@ -143,12 +143,19 @@ vite.config.ts.timestamp-*
 .vite/
 
 # ── wgpu-bun ────────────────────────────────────────────────────────────────
-# Fetched native binaries. NEVER committed — they are pinned by version + sha256 in
-# wgpu-native.manifest.ts and materialized by `bun run fetch`. Committing them would put a ~30 MB
+# Fetched native binaries AND built shims. NEVER committed — wgpu-native is pinned by version +
+# sha256 in wgpu-native.manifest.ts and materialized by `bun run fetch`; the ABI shim is produced by
+# `bun run shim:build` or fetched pinned by `bun run shim:fetch`. Committing either would put a
 # per-platform blob in git history and quietly decouple what ships from what is pinned.
 vendor/
+
+# Cargo's build tree for the ABI shim. The crate source is committed; its output is not, for the
+# same reason as above.
+shim/target/
 
 # NOTE: the design notes that briefly lived in docs/ have been moved out of this repository
 # entirely — they cite a private codebase's paths, tooling and pins, and this repository is meant
 # to be published. There is deliberately no `docs/` ignore rule here: if public documentation is
 # added later it SHOULD be committed, and a blanket ignore would silently swallow it.
+
+shim/target/

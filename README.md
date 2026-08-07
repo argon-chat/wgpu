@@ -3,19 +3,27 @@
 A [Bun](https://bun.sh) FFI binding to [wgpu-native](https://github.com/gfx-rs/wgpu-native),
 API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm package.
 
-> ## Status: alpha. It works, and it is not finished.
+> ## Status: feature-complete for what it claims; measured on one platform of four.
 >
-> `create()` returns a real `GPU`. You can request an adapter and a device, create buffers and
-> textures, compile WGSL, run a compute dispatch, render to a texture, and read the results back.
-> Error scopes report. `getCompilationInfo()` returns real diagnostics.
+> **Implemented.** `create()` returns a real `GPU`. Adapter, device, buffers, textures, samplers,
+> bind groups, pipelines, encoders, queues; WGSL compilation, compute dispatch, render to texture,
+> buffer readback. Error scopes report, with negative tests proving they can go red.
+> `getCompilationInfo()` returns real diagnostics. Backend selection is explicit.
 >
-> What is not there is listed under [Scope](#scope) and named rather than discovered: surface
-> presentation, render bundles, indirect draw, occlusion queries, external textures. Nothing else is
-> a stub — a call either does the thing or throws saying it does not exist.
+> **Refused, not stubbed.** Nothing returns a plausible-looking nothing. A call either does the
+> thing or throws saying it does not exist: the 40 wgpu-native symbols that abort the process are
+> blocklisted by name, and the five out-of-scope subsystems are listed under [Scope](#scope) —
+> surfaces, render bundles, indirect draw, occlusion queries, external textures.
 >
-> Verified end to end on `win32-x64` against wgpu-native `v29.0.1.1`. The other four platforms build
-> and typecheck but have not been executed; the ABI seam below refuses to run on Linux x64 and Intel
-> macOS rather than being silently wrong there.
+> **Proven by execution: `win32-x64` only**, against wgpu-native `v29.0.1.1` on a discrete NVIDIA
+> adapter over D3D12 — the full suite, and both of the two calling paths described under
+> [The ABI seam](#the-abi-seam). **`linux-x64`, `linux-arm64` and `darwin-arm64` are correct by rule
+> and unmeasured**: they compile, they typecheck, the struct layouts are invariant across all four by
+> an argument set out in `src/layouts/index.ts` — and no line of this package has ever run on them.
+> [What is proven and what is argued](#what-is-proven-and-what-is-argued) says exactly which is which.
+>
+> **Not published, and not ready to be.** `private: true` is still set. See
+> [Remaining gaps](#remaining-gaps).
 
 ---
 
@@ -23,7 +31,7 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 
 | | |
 |---|---|
-| Pinned wgpu-native manifest — `v29.0.1.1`, 5 platforms, sha256 for each | ✅ |
+| Pinned wgpu-native manifest — `v29.0.1.1`, 4 platforms, sha256 for each | ✅ |
 | `bun run fetch` — download, verify, extract into `vendor/<rid>/` | ✅ |
 | `resolveNativeLibrary()` — locate the installed library, report its origin | ✅ |
 | Generated C-ABI struct layouts for all 115 aggregates, checked against a C compiler | ✅ |
@@ -32,6 +40,9 @@ API-compatible with the [`webgpu`](https://www.npmjs.com/package/webgpu) npm pac
 | Error scopes, nested, with negative tests proving they report | ✅ |
 | `getCompilationInfo()`, synthesised from the creation-time validation error | ✅ |
 | Explicit, documented backend selection (D3D12 / Vulkan / Metal) | ✅ |
+| The by-value ABI hole, closed by a compiled shim — every platform, one code path | ✅ |
+| Prebuilt shim artefacts published and pinned by sha256 | ⏳ not yet released |
+| Execution on anything other than `win32-x64` | ⏳ never run |
 | Surfaces, render bundles, indirect draw, occlusion queries, external textures | ❌ out of scope |
 
 ## Why this exists
@@ -176,19 +187,100 @@ binding, not by reading anything, and both are handled here:
   and `submit()` is synchronous by specification, so suppressing submissions on suspicion would break
   every legitimate frame.
 
-### The ABI seam
+## The ABI seam
 
-Five of the eight `webgpu.h` functions that take a callback-info struct **by value** are callable
-(the other three are on the blocklist). `bun:ffi` has no struct-by-value argument type, and on Win64
-and AArch64 that does not matter: an aggregate of this size is passed by hidden reference, so handing
-over a pointer is the correct calling sequence — proven by execution, not assumed. Under the SysV
-x86-64 ABI it is copied onto the stack instead, and no combination of `bun:ffi` argument types can
-produce that.
+`bun:ffi` has no struct-by-value argument type — `FFIType` has 22 members and none of them is a
+struct. Seven wgpu-native entry points need exactly that: five of the eight `webgpu.h` functions
+taking a callback-info struct by value (the other three are on the blocklist), plus
+`wgpuAdapterInfoFreeMembers` and `wgpuSupportedFeaturesFreeMembers`.
 
-Rather than be silently wrong on Linux x64 and Intel macOS, `src/ffi/abiSeam.ts` **refuses to run**
-there. Closing the gap needs a small compiled shim behind that one module; every call site already
-passes a pointer to an already-packed buffer, which is exactly the signature such a shim would
-expose, so adopting one changes that file and nothing else.
+Everything else is fine. All 115 descriptor structs — including the 168-byte
+`WGPURenderPipelineDescriptor` with its nested vertex state — are passed **by pointer**. Descriptors
+are not the problem. The whole hazard is seven functions of 207.
+
+Whether a pointer can stand in for the aggregate is a property of the ABI, and it is not uniform:
+
+| ABI | A 40-byte aggregate argument | Pointer substitution |
+|---|---|---|
+| **Win64** | size ∉ {1,2,4,8} → by hidden reference | correct — verified by execution |
+| **AArch64 AAPCS** | size > 16 → indirect, address in a register | correct by rule |
+| **SysV x86-64** | size > 16 → class MEMORY → copied onto the stack | **wrong** |
+
+There is a second, subtler SysV case that no size check would catch: a 16-byte aggregate of two
+integer-class members (`WGPUSupportedFeatures`, every `WGPUStringView`) is passed in **two
+registers**, so a pointer is wrong there too, differently.
+
+### How it is closed
+
+`shim/` is a small Rust `cdylib` — no dependencies — that declares those aggregates as real
+`#[repr(C)]` structs, lets a real compiler emit the calling sequence, and re-exports the seven
+functions with flat pointer parameters. Since every call site already hands over a pointer to an
+already-packed buffer, **the shim's signature is the signature the binding was already using**;
+adopting it changed which library gets opened and nothing else.
+
+It resolves wgpu-native at runtime, by the exact absolute path the binding resolved, rather than
+linking it. That is not laziness: linking would risk a *second* wgpu-native instance in the process
+with its own global state, and it would tie the shim to a load-time search path when the real one is
+decided at runtime. It also means the crate builds with no headers, no import library, and no
+wgpu-native present — so a build runner needs a Rust toolchain and nothing else.
+
+Three checks run before the shim is trusted, and each corresponds to a way the pairing can be wrong:
+
+- **Flat-ABI version.** A shim built from different sources would be called with the wrong
+  arguments, which corrupts a stack rather than raising anything.
+- **wgpu-native generation.** The shim transcribes one generation's layouts by hand. Version skew is
+  the one runtime failure mode a compiled shim *adds* over the direct path, so it is refused, not
+  assumed away.
+- **`sizeof` agreement.** The shim exports `size_of` for every aggregate it declares, and the binding
+  compares it against the layouts it derived independently from the pinned headers. Two descriptions
+  of the same C types, cross-checked at runtime on the real target — which is the one thing the
+  build-time header oracle cannot do for a platform the author is not sitting on.
+
+### Every platform, not only the one that needs it
+
+Only `linux-x64` *needs* the shim among the four supported platforms. Building it for SysV alone
+would be one target instead of four, and it would leave today's proven Windows behaviour untouched.
+It is built everywhere anyway, and the reason is **where the code gets exercised**.
+
+A SysV-only shim would run on exactly one platform: the one that cannot be debugged interactively
+from the machine this package is developed on. Its first real execution would be in CI, on the
+platform where a mis-transcribed struct member is most expensive to diagnose — and its failure mode
+there is not a crash but a callback that never fires. Built for every platform, the same code runs
+on every local test invocation against a real GPU, and what ships to SysV has been executed
+thousands of times before it gets there.
+
+The cost is a four-target build matrix instead of one, paid by runners the test matrix already uses.
+
+The direct path is kept as a **fallback where the ABI provably permits it**, so a fresh checkout with
+no Rust toolchain and no published artefact behaves on Windows and ARM exactly as it did before the
+shim existed. On SysV there is no fallback, because there is nothing correct to fall back to. Three
+states, and `WGPU_BUN_SEAM=shim|direct|auto` forces the choice — `direct` on SysV is refused even
+when asked for, because an override may pick between correct paths, never select an incorrect one:
+
+| state | when |
+|---|---|
+| `shim` | a shim library resolved — preferred on every platform |
+| `direct` | no shim, but this ABI passes the aggregates by hidden reference |
+| `refuse` | no shim, and this ABI cannot express the call |
+
+A refusal throws `AbiUnsupportedError`, which is a distinct class on purpose: it is a distinct and
+expected condition, and filing it under anything else is how a reader ends up debugging a driver
+problem that does not exist.
+
+### Building and installing it
+
+```sh
+bun run shim:build     # cargo build for this host → vendor/<rid>/lib/
+bun run shim:fetch     # download the pinned prebuilt artefact (once a release exists)
+bun run shim:check     # report what is installed
+```
+
+**Consumers never need a Rust toolchain.** The shim ships prebuilt inside the same
+`@wgpu-bun/<rid>` package that carries wgpu-native — one tarball, one version, one `os`/`cpu` match.
+That is deliberate rather than convenient: a shim transcribes one wgpu-native generation's layouts,
+so the two are only correct as a pair, and shipping them together makes separating them impossible
+rather than merely inadvisable. Resolution is the same three tiers as the native library —
+`WGPU_BUN_SHIM_LIB` → `@wgpu-bun/<rid>` → `vendor/<rid>/`.
 
 ## Scope
 
@@ -266,6 +358,55 @@ And by design:
 - **Node.** Bun-only, deliberately — `bun:ffi` *is* the implementation strategy.
 - **WebGPU CTS conformance.** A worthy goal; not a claim that will be made before it is measured.
 
+## What is proven and what is argued
+
+The distinction this section exists for: **executed** means a machine ran it and the result was
+observed. **Argued** means it follows from a document — an ABI specification, a header — and nothing
+has run. Both can be true; only one is evidence. Everything below is one or the other, explicitly.
+
+### Executed
+
+| | |
+|---|---|
+| The whole suite on `win32-x64`, discrete NVIDIA adapter, D3D12 | adapter → device → compute dispatch → render to texture → readback → error scopes |
+| Both seam paths on `win32-x64` | `WGPU_BUN_SEAM=shim` and `=direct` each run the full suite green; the shim binds all seven entry points |
+| The shim's `sizeof` against the derived layouts | at runtime, on the real target, for all five aggregates it declares |
+| The struct-layout oracle on `win32-x64` | all 115 aggregates, `sizeof`/`offsetof` from a real C compiler on the pinned headers |
+| Two of the forty abort-on-call symbols, by hand | `wgpuBufferWriteMappedRange` aborts; `wgpuBufferGetMappedRange` works |
+
+### Argued, not executed
+
+| | Basis | What would settle it |
+|---|---|---|
+| `linux-x64`, `linux-arm64`, `darwin-arm64` — anything at all | they compile and typecheck | running the CI matrix once |
+| **The SysV calling sequence** the shim exists to produce | the psABI aggregate-classification rule, plus the fact that a real compiler emits it | a `linux-x64` run; this is the single most load-bearing unexecuted claim here |
+| AArch64 by-value behaviour | AAPCS: >16 bytes is indirect | an `arm64` run |
+| Struct layouts being identical on all four platforms | both headers use only fixed-width scalars, enums, pointers and `size_t` — no `long`, no bitfields, no arrays, so LLP64 and LP64 cannot diverge | the oracle running on the other three |
+| Whether the layout oracle's header-shadowing trick survives outside Windows | it has only ever run there | the same |
+| Thirty-eight of the forty abort-on-call symbols | upstream's Rust source at the pinned tag | the subprocess-per-symbol sweep (`bun run derive:aborts:probe`) |
+| That a hosted macOS runner exposes a usable Metal device | paravirtualised Metal is documented to exist | a `darwin-arm64` run |
+
+## Remaining gaps
+
+Ordered by what blocks a release.
+
+1. **The platform matrix has never run.** Four supported platforms, one measured. Everything in
+   *Argued* above resolves the first time CI runs green, and nothing should be published before it
+   does.
+2. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
+   `bun run shim:fetch` refuses to install, by design. Until then the acquisition paths are
+   `bun run shim:build` (needs cargo) or the platform npm package, which does not exist either.
+3. **`private: true` is still set**, and `bun run release:check` names it as a blocker. It is an
+   interlock, not an oversight: `npm publish` refuses a private package, so nothing can reach the
+   registry by accident. Clearing it is a deliberate release decision that belongs in the release
+   commit next to the version bump.
+4. **The version is `0.0.0`.** It stays `0.0.x` while the status flag says the binding is
+   unfinished — the test suite binds those two together so the claim and the code cannot drift.
+5. **The behaviour-derived blocklist sweep has not been run** against the shipped binary. The list is
+   source-accurate at the pinned tag; the tag and the shipped build can differ by a commit, which is
+   the reason the second derivation exists.
+6. **No WebGPU CTS run.** A worthy goal, and not a claim that will be made before it is measured.
+
 ## Install
 
 Not published yet. The npm name `wgpu-bun` was unclaimed as of 2026-08-07, and nothing will be pushed
@@ -277,10 +418,15 @@ To work on it:
 ```sh
 bun install
 bun run fetch          # download + verify the pinned wgpu-native for this host
+bun run shim:build     # build the ABI shim (needs cargo; see The ABI seam)
 bun run check:layouts  # confirm the generated struct layouts match those headers
 bun run typecheck
 bun test
 ```
+
+`shim:build` is optional on Windows and ARM, where the direct path is correct anyway — but building
+it means the tests exercise the path that ships. On `linux-x64` it is not optional: without it the
+GPU suites skip with `abi-unsupported`.
 
 ## Usage
 
@@ -314,12 +460,20 @@ console.log(resolveNativeLibrary());
 //   includeDir: '…/vendor/win32-x64/include', version: 'v29.0.1.1' }
 ```
 
-## How the native library reaches you
+## How the native libraries reach you
 
 Via **per-platform npm packages in `optionalDependencies`** — `@wgpu-bun/win32-x64`,
-`@wgpu-bun/linux-x64`, and so on, each carrying one shared library and declaring `os` / `cpu` so your
-package manager installs exactly the matching one. This is what esbuild, swc, sharp and `bun-webgpu`
-all do.
+`@wgpu-bun/linux-x64`, and so on, each declaring `os` / `cpu` so your package manager installs
+exactly the matching one. This is what esbuild, swc, sharp and `bun-webgpu` all do.
+
+Each carries **two** shared libraries: upstream's `wgpu_native`, and this project's ABI shim. They
+ship in one tarball rather than two packages because a shim transcribes one wgpu-native generation's
+struct layouts by hand and is only correct paired with it — one package makes the two impossible to
+separate, where two packages would merely make separating them a bad idea. The binding does check for
+skew at load and refuses, but never being able to reach that state is better than refusing well.
+
+Neither library is fetched at install time, and **no consumer needs a Rust toolchain**: the shim is
+built by CI, one platform per matching runner, and published as a prebuilt artefact.
 
 ### Why not a postinstall hook
 
@@ -357,16 +511,22 @@ remains the development path.
 ### Unpublished platforms
 
 Nothing is published yet, so `optionalDependencies` is **absent** from `package.json` rather than
-listing five packages the install cannot resolve. `bun run release:wire` writes the block at release
+listing four packages the install cannot resolve. `bun run release:wire` writes the block at release
 time from the same manifest that pins the binaries. Any platform whose archive did not land is
 reported as unpublished rather than declared as a target.
 
 ## Supply chain
 
-Native binaries are **fetched, never committed**. Every download is pinned to an exact URL and an
-exact sha256 in [`wgpu-native.manifest.ts`](wgpu-native.manifest.ts), and a mismatch always hard-fails
-— including under `--soft`, which exists so a fresh clone without network can still proceed, not to
-wave through an unexpected binary.
+Native binaries are **fetched, never committed** — upstream's and ours alike. Every download is
+pinned to an exact URL and an exact sha256, in [`wgpu-native.manifest.ts`](wgpu-native.manifest.ts)
+for upstream's archives and [`shim.manifest.ts`](shim.manifest.ts) for the ABI shim, and a mismatch
+always hard-fails — including under `--soft`, which exists so a fresh clone without network can still
+proceed, not to wave through an unexpected binary.
+
+The same rule covers the shim's *absence* of a pin: every shim `sha256` is empty because no shim
+release has been cut, an empty hash means unpinned, and `bun run shim:fetch` refuses to install an
+unpinned binary and says why. A plausible-looking invented hash in a supply-chain file is worse than
+a blank one.
 
 ```sh
 bun run fetch                      # this host
@@ -419,6 +579,8 @@ bun test                       # everything; GPU suites skip loudly when there i
 bun run check:layouts          # generated layouts vs. the fetched headers
 bun run derive:aborts:source   # re-derive the abort blocklist from upstream source (--check to gate)
 bun run derive:aborts:probe    # re-derive it by execution; slow, run on a pin bump
+cd shim && cargo test          # the shim's own view of the aggregates it declares
+WGPU_BUN_SEAM=direct bun test  # the same suite over the other calling path, where the ABI allows it
 ```
 
 **A skipped GPU suite must never read as a passed one.** The rules:
@@ -428,20 +590,33 @@ bun run derive:aborts:probe    # re-derive it by execution; slow, run on a pin b
 | No native library installed | **fails** | `WGPU_BUN_ALLOW_NO_LIBRARY=1` |
 | No adapter on this host | **fails** | `WGPU_BUN_ALLOW_NO_ADAPTER=1` |
 | `requestDevice` failed with an adapter present | **fails** | none — that is a defect |
+| The ABI needs the shim and none is installed | skips | none; the escape is installing it |
 | The binding is unimplemented | skips | none; see below |
 
 The escapes are environment variables rather than auto-detection, so granting one is a visible,
 per-job decision a reviewer can see in the workflow file, and a local run never grants itself one.
+
+**`abi-unsupported` is its own reason, and that matters more than it looks.** The seam's refusal used
+to reach the gate as an untyped throw from `requestAdapter()` and get filed under `no-adapter` — a
+diagnosis meaning "this host has no GPU". On the `linux-x64` CI runner that was flatly untrue:
+`vulkaninfo` reports `llvmpipe (LLVM 20.1.2) / DRIVER_ID_MESA_LLVMPIPE` on the same machine, so the
+software adapter was installed and visible the whole time, and the label sent a reader looking for a
+driver problem that did not exist. A binding declining an ABI it cannot express and a machine with no
+GPU are different facts. There is no environment variable for it, because "run without the artefact
+that makes it correct" is not a decision anyone should be able to grant: it is a permitted skip only
+while **no shim is installed for the host**, and if one is installed and the seam still refused, that
+is a defect and it goes red. The kind stops being reachable the moment the artefact lands —
+mechanically, rather than by anyone remembering to delete it.
 
 The unimplemented-skip would be a permanent loophole — never finish it and nothing ever has to run —
 except that the same flag is bound to the package's public claims: while it is set, the README must
 carry the status banner and the version must stay `0.0.x`. The way out of the skip is not a knob, it
 is shipping.
 
-CI runs a five-platform matrix. Linux legs install Mesa's lavapipe and are **required** to find an
+CI runs a four-platform matrix. Linux legs install Mesa's lavapipe and are **required** to find an
 adapter; the Windows and macOS legs are permitted to skip while it is established whether WARP and
 paravirtualised Metal come up on hosted runners. A final job reads one marker per leg and **fails the
-run if no leg anywhere reached a device** — five individually-defensible skips must not add up to a
+run if no leg anywhere reached a device** — four individually-defensible skips must not add up to a
 meaningless pass.
 
 ## Conventions
@@ -457,8 +632,11 @@ A few choices that a reader might otherwise wonder about:
   is honest at `0.x` and only at `0.x` — after a 1.0, a package strangers depend on owes them real
   deprecation periods, and this rule yields to semver at that point. Saying so now beats making a
   promise that gets quietly broken later.
-- **No build step.** Bun consumes the TypeScript sources directly; there is no `dist/`, no bundler and
-  no source-map drift.
+- **No build step for the JavaScript.** Bun consumes the TypeScript sources directly; there is no
+  `dist/`, no bundler and no source-map drift. The one compiled artefact is the ABI shim, and it is
+  built by CI and shipped prebuilt — a consumer never compiles anything, and a contributor only needs
+  cargo if they are changing `shim/src/lib.rs`. That is a real cost and it is the price of being
+  correct on SysV x86-64; it is recorded rather than glossed over.
 - **Files stay under ~600 lines**, split by responsibility when they grow past it.
 
 ## Licence

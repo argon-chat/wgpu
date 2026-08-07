@@ -137,7 +137,7 @@ export class GPUAdapter {
     });
 
     // The strings were allocated by wgpu-native; hand them back. This entry point takes the whole
-    // 88-byte struct BY VALUE, which is why it lives behind the ABI seam.
+    // 96-byte struct BY VALUE, which is why it lives behind the ABI seam.
     seam().wgpuAdapterInfoFreeMembers(infoPtr);
     return result;
   }

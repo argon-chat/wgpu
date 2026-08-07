@@ -60,20 +60,27 @@ export interface IWebGPUGlobals {
 export type GPUEntryPoint = GPU;
 
 /**
- * Where the native library came from, for diagnostics.
+ * Where a native library came from, for diagnostics.
  *
- * Reported by {@link import("./resolve.ts").resolveNativeLibrary} so a confusing "wrong wgpu"
+ * Reported by {@link import("./resolve.ts").resolveNativeLibrary} and
+ * {@link import("./resolve.ts").tryResolveShimLibrary} so a confusing "wrong wgpu" or "wrong shim"
  * failure is one log line away from an answer, rather than a filesystem archaeology session.
  */
 export type NativeLibrarySource =
-  /** `WGPU_NATIVE_LIB` env var — an explicit absolute path, wins over everything. */
+  /** `WGPU_NATIVE_LIB` / `WGPU_BUN_SHIM_LIB` env var — an explicit absolute path, wins over everything. */
   | "env"
-  /** A per-platform npm sub-package (`@wgpu-bun/<rid>`), if one is installed. */
+  /** A per-platform npm sub-package (`@wgpu-bun/<rid>`), if one is installed. It carries both libraries. */
   | "npm"
-  /** `vendor/<rid>/lib/…`, produced by `scripts/fetch-wgpu-native.ts`. */
+  /** `vendor/<rid>/lib/…`, produced by `scripts/fetch-wgpu-native.ts` or `scripts/shim.ts`. */
   | "vendor";
 
-/** A located wgpu-native shared library. */
+/**
+ * A located shared library — either wgpu-native or the ABI shim.
+ *
+ * One type for both because the two are found identically, by the same three-tier walk. The fields
+ * that only apply to one are nullable rather than split into a second near-identical interface:
+ * `includeDir` is always `null` for the shim, which ships no headers.
+ */
 export interface IResolvedNativeLibrary {
   /** Absolute path to the shared library. */
   path: string;

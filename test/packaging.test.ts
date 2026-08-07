@@ -142,6 +142,12 @@ describe("platform packages", () => {
 
     expect(m["files"]).toContain("lib");
 
+    // The ABI shim ships in the same package as wgpu-native, deliberately. A shim transcribes one
+    // wgpu-native generation's struct layouts by hand, so the two are only correct as a pair; one
+    // tarball makes separating them impossible rather than merely inadvisable.
+    expect(m["files"]).toContain(".shim-version");
+    expect(m["description"]).toContain("ABI shim");
+
     // The package is almost entirely someone else's binary. Declaring this repository's licence
     // alone would understate the terms a consumer accepts by installing it.
     expect(m["license"]).toBe("MIT OR Apache-2.0");

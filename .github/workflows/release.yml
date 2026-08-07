@@ -57,10 +57,56 @@ permissions:
   contents: read
 
 jobs:
+  # ── The one thing that genuinely cannot be done on one runner. ─────────────────────────────────
+  #
+  # Everything else here cross-fetches happily: upstream's archives are just files. The ABI shim is
+  # not — it is a `cdylib` this repository compiles, and cross-linking one for four targets from a
+  # single runner means four target toolchains and four chances for a linker to be subtly different
+  # from the one CI actually tests with. Building each on its matching runner costs four cheap jobs
+  # and removes the whole question.
+  #
+  # It is built for all four platforms, not only for `linux-x64` where the ABI requires it. See
+  # `shim.manifest.ts` for why: preferring the shim uniformly is what makes the SysV path something
+  # that has been executed rather than something that has been reasoned about.
+  shim:
+    name: shim (${{ matrix.rid }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true # a release missing one platform's shim must not proceed to publish
+      matrix:
+        include:
+          - { rid: win32-x64, runner: windows-latest }
+          - { rid: linux-x64, runner: ubuntu-latest }
+          - { rid: linux-arm64, runner: ubuntu-24.04-arm }
+          - { rid: darwin-arm64, runner: macos-15 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+      - run: bun install --frozen-lockfile
+
+      - name: Shim crate unit tests
+        working-directory: shim
+        run: cargo test
+
+      - run: bun run shim:build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shim-${{ matrix.rid }}
+          # `vendor/` and not `vendor/<rid>/`: the artefact root has to KEEP the rid directory, or
+          # `merge-multiple: true` downstream flattens four platforms' libraries into one folder and
+          # three of them silently lose. Nothing else is in `vendor/` on this runner — the job does
+          # not fetch wgpu-native — so this uploads exactly the shim.
+          path: vendor
+          if-no-files-found: error
+
   # ── Everything that can be checked without a GPU, on one runner, before anything is published. ─
   verify:
     name: verify
     runs-on: ubuntu-latest
+    needs: shim
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -81,22 +127,35 @@ jobs:
       - run: bun run check:layouts
       - run: bun run derive:aborts:source -- --check
 
+      - name: Collect the per-platform shims
+        # Before the tests, not after. This runner is linux-x64 — the one ABI that cannot work
+        # without the shim — so downloading first means `bun test` exercises the shim path here
+        # rather than recording a permitted `abi-unsupported` skip.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shim-*
+          path: vendor
+          merge-multiple: true
+
       - name: Test (no GPU on this runner)
         # The GPU suites skip here by design; `ci.yml` is where they are required to run. What this
-        # proves is the platform-independent half — layouts, blocklist, packaging, compat surface.
+        # proves is the platform-independent half — layouts, blocklist, packaging, compat surface,
+        # and that the shim built by the matrix loads and agrees with the derived layouts.
         env:
           WGPU_BUN_ALLOW_NO_ADAPTER: "1"
         run: bun test
 
       - name: Release preflight
-        # Refuses on a missing `repository.url`, on `"private": true`, and on any platform whose
-        # archive did not land.
+        # Refuses on a missing `repository.url`, on `"private": true`, on any platform whose archive
+        # did not land, and on any platform with no ABI shim. That last one is the reason `needs`
+        # includes the shim matrix: a release that shipped three usable platforms and one that
+        # refuses to run is worse than no release.
         run: bun run release:check
 
   publish:
     name: publish to npm
     runs-on: ubuntu-latest # GitHub-hosted: trusted publishing does not work on self-hosted runners
-    needs: verify
+    needs: [shim, verify]
     permissions:
       id-token: write # the OIDC token that replaces NPM_TOKEN
       contents: read
@@ -128,12 +187,24 @@ jobs:
             bun run fetch --rid "$rid"
           done
 
+      - name: Collect the per-platform shims
+        # Each was built on its own runner by the `shim` matrix. They land back in `vendor/<rid>/`,
+        # beside the fetched wgpu-native, which is where `release:stage` looks for both.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: shim-*
+          path: vendor
+          merge-multiple: true
+
       - name: Stage the per-platform packages
+        # One package per RID, carrying wgpu-native AND the shim. They ship together because a shim
+        # transcribes one wgpu-native generation's struct layouts by hand and is only correct paired
+        # with it.
         run: bun run release:stage
 
       - name: Wire optionalDependencies into the root package
         # Written at release time rather than committed: until the platform packages exist on npm,
-        # a committed block would mean every `bun install` tries to resolve five 404s.
+        # a committed block would mean every `bun install` tries to resolve four 404s.
         run: bun run release:wire
 
       - name: Publish platform packages first

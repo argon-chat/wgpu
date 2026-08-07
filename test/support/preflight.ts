@@ -17,22 +17,31 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
+import { seamStatus } from "../../src/index.ts";
 import { gate, skipIsPermitted } from "./gpu.ts";
 
 const markerIdx = process.argv.indexOf("--marker");
 const markerPath = markerIdx !== -1 ? process.argv[markerIdx + 1] : null;
+
+const seam = seamStatus();
 
 const summary = {
   platform: `${process.platform}-${process.arch}`,
   gate: gate.kind,
   permitted: skipIsPermitted(),
   adapter: gate.kind === "ready" ? gate.adapterLabel : null,
+  // Reported unconditionally, not only on a refusal. Which calling path a green run took is the
+  // thing a reader most wants to know when comparing two legs of the matrix, and inferring it from
+  // the absence of an error is how the previous misclassification survived.
+  seam: seam.mode,
+  shim: seam.shim ? `${seam.shim.version ?? "?"} via ${seam.shim.source}` : null,
   detail: gate.kind === "ready" ? null : gate.detail,
 };
 
 console.log(`\nwgpu-bun GPU preflight — ${summary.platform}`);
 console.log(`  gate      : ${summary.gate}`);
 console.log(`  adapter   : ${summary.adapter ?? "(none)"}`);
+console.log(`  seam      : ${summary.seam}${summary.shim ? ` (shim ${summary.shim})` : ""}`);
 console.log(`  permitted : ${summary.permitted}`);
 if (summary.detail) console.log(`  detail    : ${summary.detail.split("\n")[0]}`);
 console.log("");
@@ -40,7 +49,7 @@ console.log("");
 if (process.env["GITHUB_STEP_SUMMARY"]) {
   const row =
     gate.kind === "ready"
-      ? `| \`${summary.platform}\` | ✅ ran | ${summary.adapter} |`
+      ? `| \`${summary.platform}\` | ✅ ran (${summary.seam}) | ${summary.adapter} |`
       : `| \`${summary.platform}\` | ⚠️ skipped (${gate.kind}) | — |`;
   fs.appendFileSync(process.env["GITHUB_STEP_SUMMARY"]!, `${row}\n`);
 }

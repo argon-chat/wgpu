@@ -31,7 +31,9 @@
   "files": [
     "src",
     "scripts/fetch-wgpu-native.ts",
+    "scripts/shim.ts",
     "wgpu-native.manifest.ts",
+    "shim.manifest.ts",
     "README.md",
     "LICENSE"
   ],
@@ -62,6 +64,9 @@
     "fetch:hashes": "bun run scripts/fetch-wgpu-native.ts --update-hashes",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "shim:build": "bun run scripts/shim.ts --build",
+    "shim:fetch": "bun run scripts/shim.ts --fetch",
+    "shim:check": "bun run scripts/shim.ts --check",
     "gen:layouts": "bun run scripts/gen-layouts.ts",
     "check:layouts": "bun run scripts/gen-layouts.ts --check",
     "check:upstream": "bun run scripts/check-upstream.ts",
