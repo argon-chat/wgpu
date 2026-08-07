@@ -124,13 +124,15 @@ jobs:
             allow_no_adapter: "0"
           - rid: win32-x64
             runner: windows-latest
-            # WARP ships with Windows, but whether wgpu-native's D3D12 backend enumerates it on a
-            # hosted runner is unverified. Permitted, and reported either way.
-            allow_no_adapter: "1"
+            # Measured: wgpu-native's D3D12 backend does enumerate WARP (Microsoft Basic Render
+            # Driver) on a hosted runner. The permission that used to sit here existed only while
+            # that was unknown, so it is gone — a skip here would now be a regression, not a fact
+            # about the runner.
+            allow_no_adapter: "0"
           - rid: darwin-arm64
             runner: macos-15
-            # Paravirtualised Metal. Expected to work; not measured.
-            allow_no_adapter: "1"
+            # Measured: the Apple Paravirtual device comes up over Metal. Same reasoning as above.
+            allow_no_adapter: "0"
           # Intel macOS is not a target — see the note in wgpu-native.manifest.ts.
 
     steps:

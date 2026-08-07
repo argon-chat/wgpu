@@ -501,29 +501,43 @@ All three were mutation-tested — each was made to fail deliberately before bei
 
 ## Remaining gaps
 
-Ordered by what blocks a release.
+Things a reader should know are not done. None of them blocks installing or using the package.
 
-1. **No shim release has been cut**, so every `sha256` in `shim.manifest.ts` is empty — which means
-   `bun run shim:fetch` refuses to install, by design. Until then the acquisition paths are
-   `bun run shim:build` (needs cargo) or the platform npm package, which does not exist either.
-2. **`private: true` is still set**, and `bun run release:check` names it as a blocker. It is an
-   interlock, not an oversight: `npm publish` refuses a private package, so nothing can reach the
-   registry by accident. Clearing it is a deliberate release decision that belongs in the release
-   commit next to the version bump.
-3. **The version is `0.0.0`.** It stays `0.0.x` while the status flag says the binding is
-   unfinished — the test suite binds those two together so the claim and the code cannot drift.
-4. **The behaviour-derived blocklist sweep has not been run** against the shipped binary. The list is
-   source-accurate at the pinned tag; the tag and the shipped build can differ by a commit, which is
-   the reason the second derivation exists.
-5. **No WebGPU CTS run.** A worthy goal, and not a claim that will be made before it is measured.
+1. **The prebuilt shim artefacts are not released yet**, so every `sha256` in `shim.manifest.ts` is
+   empty and `bun run shim:fetch` refuses to install — an empty hash is treated as *unpinned*, not
+   as *unchecked*. Until the first release cuts them, the working acquisition paths are the platform
+   npm package (which carries the shim beside the native library) and `bun run shim:build`, which
+   needs a cargo toolchain. Only `win32-x64` can run without one at all.
+2. **The behaviour-derived blocklist sweep has not been run** against the shipped binary. The list of
+   40 abort-on-call symbols is source-accurate at the pinned tag, and the tag and the shipped build
+   can differ by a commit — which is precisely why a second, execution-based derivation exists
+   (`bun run derive:aborts:probe`). Two of the forty have been confirmed by hand.
+3. **No WebGPU CTS run.** A worthy goal. It will not be claimed before it is measured.
+4. **No discrete GPU outside Windows.** Every non-Windows platform was proven on a software or
+   paravirtualised adapter, because that is what hosted runners offer. Nothing in the binding is
+   adapter-specific — but "nothing is" is an argument, and this file keeps arguments and measurements
+   apart.
+5. **`win32-arm64` is not a target.** It would pair the Win64 aggregate rule with AAPCS register
+   assignment, and that combination has never run here. Adding it is a runner and an entry in the
+   manifest, not new code — but it would be a claim without evidence until it runs.
 
 ## Install
 
-Not published yet. The npm name `wgpu-bun` was unclaimed as of 2026-08-07, and nothing will be pushed
-to it until the platform matrix has actually been executed on more than one platform — publishing a
-package whose claims outrun its evidence is how the next person loses a day.
+```sh
+bun add wgpu-bun
+```
 
-To work on it:
+The native library and the ABI shim arrive with it, as an `optionalDependencies` platform package
+matching your `os`/`cpu`. There is **no install hook** — see
+[Why not a postinstall hook](#why-not-a-postinstall-hook).
+
+If no platform package matches your host, the install still succeeds — that is how
+`optionalDependencies` behaves — and the failure surfaces at `create()` instead, naming your
+platform, the package that was looked for, and the `WGPU_NATIVE_LIB` override. That message is the
+only diagnostic an unsupported platform ever gets, so it is written to be actionable rather than
+apologetic.
+
+To work on the package itself:
 
 ```sh
 bun install
@@ -733,9 +747,12 @@ except that the same flag is bound to the package's public claims: while it is s
 carry the status banner and the version must stay `0.0.x`. The way out of the skip is not a knob, it
 is shipping.
 
-CI runs a four-platform matrix. Linux legs install Mesa's lavapipe and are **required** to find an
-adapter; the Windows and macOS legs are permitted to skip while it is established whether WARP and
-paravirtualised Metal come up on hosted runners. A final job reads one marker per leg and **fails the
+CI runs a four-platform matrix, and **every leg is now required to find an adapter** — the Linux legs
+install Mesa's lavapipe, Windows gets WARP and macOS a paravirtualised Metal device, all three
+confirmed by execution. They were permitted to skip only while it was unknown whether those adapters
+come up on hosted runners; that question is answered, so the permission is gone. A green matrix means
+the suite ran everywhere, not that it was excused somewhere. A final job reads one marker per leg and
+**fails the
 run if no leg anywhere reached a device** — four individually-defensible skips must not add up to a
 meaningless pass.
 
