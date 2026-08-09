@@ -47,6 +47,7 @@ import {
   dawnRids,
 } from "../dawn.manifest.ts";
 import { displace } from "./displace.ts";
+import { wgpuSymbolsIn } from "./symbolTable.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(PKG_ROOT, "vendor");
@@ -303,7 +304,12 @@ function linkDarwin(io: ILinkInputs): void {
  * parsed but ignored, a `force_load` that silently matched no archive. That failure is invisible
  * until the first `dlsym`, so it is checked here instead.
  */
-function verifyExports(io: ILinkInputs): { count: number; reader: string } {
+function verifyExports(io: ILinkInputs): {
+  count: number;
+  reader: string;
+  sample: string[];
+  lineCount: number;
+} {
   const platform = platformOf(io.rid);
 
   /**
@@ -369,8 +375,13 @@ function verifyExports(io: ILinkInputs): { count: number; reader: string } {
         `       An unverified library must not be published, so this is an error rather than a note.`,
     );
   }
-  const found = new Set([...text.matchAll(/\b(wgpu[A-Za-z0-9_]+)\b/g)].map((m) => m[1]!));
-  return { count: found.size, reader };
+  const found = wgpuSymbolsIn(text);
+  // Carried out so a zero can be *shown* rather than asserted. "0 symbols" has two very different
+  // causes — the library exports nothing, or the reader's output is not shaped the way the parser
+  // expects — and they are indistinguishable from a count alone. The Mach-O underscore regression
+  // was the second kind, and three lines of the listing would have ended it on the spot.
+  const lines = text.split("\n").filter((l) => l.trim());
+  return { count: found.size, reader, sample: lines.slice(0, 3), lineCount: lines.length };
 }
 
 function main(argv: string[]): void {
@@ -428,7 +439,9 @@ function main(argv: string[]): void {
       `${rid}: linked, but only ${exported.count} wgpu* symbols are exported (read with \`${exported.reader}\`).\n` +
         `       A library that links and exports nothing fails at the first dlsym, far from here.\n` +
         `       Zero usually means the export filter matched nothing: the generated .def, the version\n` +
-        `       script, or the -exported_symbols_list — not the link itself.`,
+        `       script, or the -exported_symbols_list — not the link itself.\n` +
+        `       The reader printed ${exported.lineCount} line(s); the first few were:\n` +
+        exported.sample.map((l) => `         ${l}`).join("\n"),
     );
   } else {
     ok(`${rid}: ${exported.count} wgpu* symbols exported (${exported.reader})`);
