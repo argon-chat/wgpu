@@ -4,46 +4,40 @@
  * ══ The uncaptured-error callback is a precondition, not a feature ══
  *
  * The shipped `wgpu_native.dll` carries the string
- * `Handling wgpu uncaptured errors as fatal by default`. That is deliberate upstream behaviour: a
- * device created without an `uncapturedErrorCallbackInfo` installs a default handler that
- * **panics**, and because the panic crosses a `nounwind` boundary it is escalated to `abort`. So
- * the *first ordinary validation error anywhere* kills the process — no exception, no JS stack, no
- * partial results, and every other suite sharing that process dies with it.
+ * `Handling wgpu uncaptured errors as fatal by default`. A device created without an
+ * `uncapturedErrorCallbackInfo` installs a default handler that **panics**, and the panic crosses a
+ * `nounwind` boundary and is escalated to `abort`. So the *first ordinary validation error anywhere*
+ * kills the process — no exception, no JS stack, no partial results, and every other suite sharing
+ * that process dies with it. There is no post-hoc setter, so there is no window in which it is safe
+ * to be missing: it must be in the `WGPUDeviceDescriptor` at creation, and {@link ./device.ts} does
+ * that unconditionally.
  *
- * There is no post-hoc setter for it and therefore no window in which it is safe to be missing: it
- * must be present in the `WGPUDeviceDescriptor` at creation, before anything else can go wrong.
- * {@link ./device.ts} does that unconditionally — it is not an option a caller can decline.
- *
- * The callback itself must never throw. A JS exception propagating back into Rust is undefined
- * behaviour, and it would turn the mechanism that exists to *prevent* aborts into another cause of
- * them. Everything here collects and reports.
+ * ⚠ The callback itself must never throw. A JS exception propagating back into Rust is undefined
+ * behaviour, and would turn the mechanism that prevents aborts into another cause of them.
+ * Everything here collects and reports.
  *
  * ══ Error scopes are the assertion, so they must not be able to lie ══
  *
- * In the corpus this package targets, `await device.popErrorScope()` *is* the test — its result
- * feeds pass/fail with nothing in between, and the common case is the **empty** scope that must
- * come back falsy. Two failure modes matter, and the quiet one is worse:
+ * In the corpus this package targets, `await device.popErrorScope()` *is* the test, and the common
+ * case is the **empty** scope that must come back falsy. Two failure modes matter:
  *
  *   - a scope that crashes on the empty path takes the process down mid-suite with no attribution
  *     (this is what the pooled-userdata binding does);
  *   - a scope that accepts the call and never records anything makes every assertion built on it
- *     pass **vacuously**. No type gate, no lint and no assertion count can see that.
+ *     pass **vacuously**. No type gate, lint or assertion count can see that.
  *
- * Both are addressed structurally rather than by care: the pop goes through the polled `settle()`
- * path, so it physically cannot resolve before wgpu-native has delivered a verdict, and the result
- * is only ever produced by the native callback.
+ * Both are addressed structurally: the pop goes through the polled `settle()` path, so it cannot
+ * resolve before wgpu-native has delivered a verdict, and the result only ever comes from the native
+ * callback.
  *
  * ══ The shadow stack ══
  *
  * `getCompilationInfo` is an `unimplemented!()` stub in this build, so shader diagnostics are
- * recovered by wrapping `createShaderModule` in an *internal* error scope. Scopes nest, which
- * creates a real hazard: an internal scope opened inside a caller's scope would swallow the error
- * the caller was waiting for.
- *
- * {@link ErrorScopeStack} closes that. Each JS-side entry carries a `shadow` slot; when an internal
- * scope captures an error while a caller's scope is open, the error is deposited in the innermost
- * matching caller entry, and `popErrorScope()` returns the native result *or* the shadow. The
- * caller sees the error it would have seen, and the shader module gets its diagnostics too.
+ * recovered by wrapping `createShaderModule` in an *internal* error scope. Scopes nest, so an
+ * internal scope opened inside a caller's scope would swallow the error the caller was waiting for.
+ * {@link ErrorScopeStack} closes that: each JS-side entry carries a `shadow` slot, an internal
+ * scope's capture is deposited in the innermost matching caller entry, and `popErrorScope()` returns
+ * the native result *or* the shadow. The caller sees its error, the shader module gets diagnostics.
  */
 
 import { C } from "../enums.ts";
@@ -99,8 +93,7 @@ interface IScopeEntry {
  * A JS-side mirror of the native scope stack, existing only to make internal scopes transparent.
  *
  * It never replaces the native scopes — wgpu-native still does the capturing. It records only what
- * the native side cannot: that an error which *would* have reached a caller's scope was
- * intercepted, and by whom.
+ * the native side cannot: that an error which *would* have reached a caller's scope was intercepted.
  */
 export class ErrorScopeStack {
   readonly #entries: IScopeEntry[] = [];
@@ -113,13 +106,9 @@ export class ErrorScopeStack {
    * Pop the JS mirror. Returns any error deposited by a nested internal scope.
    *
    * Returns `undefined` when there was no matching entry — a caller popping more scopes than it
-   * pushed.
-   *
-   * That case never reaches here any more: `GPUDevice.popErrorScope` refuses an empty stack up
+   * pushed. ⚠ That case no longer reaches here: `GPUDevice.popErrorScope` refuses an empty stack up
    * front, because the native call **aborts the process** on it (an `Option::unwrap()` on `None`
-   * inside wgpu-native, non-unwinding across the C ABI). An earlier revision of this comment said
-   * the native side "reports it" — it does not, and that mistaken belief is exactly what would have
-   * left the guard unwritten.
+   * inside wgpu-native, non-unwinding across the C ABI). The native side does *not* report it.
    */
   pop(): GPUError | null | undefined {
     const entry = this.#entries.pop();

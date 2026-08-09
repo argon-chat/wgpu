@@ -63,29 +63,6 @@ populating `vendor/` without cargo. To make it work, publish the four artefacts 
 already builds under the tag `shim-v3.0.0` (`SHIM_VERSION` in `shim.manifest.ts`), then
 `bun run shim:fetch --update-hashes` and paste the measured hashes.
 
-## Getting listed: `awesome-bun`
-
-[`oven-sh/awesome-bun`](https://github.com/oven-sh/awesome-bun) is Bun's own curated list, and it
-currently contains **no WebGPU or GPU entry at all** — not this package, not `bun-webgpu`, nothing
-under Extensions → Libraries touching graphics.
-
-The rules, from its `CONTRIBUTING.md`, in full: search previous suggestions first; one pull request
-per suggestion; title-case the name; use the format `[Title Case Name](link) - Description.`;
-descriptions short, starting with a capital and ending with a full stop; check spelling and grammar;
-strip trailing whitespace; give the PR a useful title; and **put a link to the repository in the
-commit message body**.
-
-The entry, to be added to the `### Libraries` list under `## Extensions`:
-
-```markdown
-- [wgpu-bun](https://github.com/argon-chat/wgpu-bun) - WebGPU for Bun via bun:ffi and wgpu-native. Headless compute and offscreen rendering.
-```
-
-The existing entries do not consistently follow the title-case rule (`bun-types`, `blipgloss`,
-`bnx`), so a lowercase package name is in keeping with the list as it actually reads.
-`CONTRIBUTING.md` says maintainers ask for edits on the existing PR rather than a new one, so expect
-a round of review.
-
 ## Repository name: deliberately NOT the package name
 
 The npm package is `wgpu-bun`; the repository is `argon-chat/wgpu`, and it stays that way.

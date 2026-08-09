@@ -7,10 +7,11 @@
  * validation is all move between generations. A filename or a directory name is not evidence of
  * any of that; a version read out of the loaded binary is.
  *
- * The check is a **warning, not a hard failure**, for one reason: a caller who points
- * `WGPU_NATIVE_LIB` at a locally-built wgpu-native is usually doing so deliberately (bisecting an
- * upstream regression), and refusing to run would remove the escape hatch. The mismatch is loud on
- * stderr and readable from {@link nativeVersion}, so it can never be silent.
+ * A supported generation that is not the pinned one is reported once and allowed. A generation this
+ * package has never been run against is **refused** — see {@link assertSupportedGeneration} for why
+ * warning was not enough — with `WGPU_BUN_ALLOW_UNTESTED_GENERATION=1` as the deliberate escape
+ * hatch for someone bisecting an upstream regression. Either way the version is readable from
+ * {@link nativeVersion}, so it can never be silent.
  */
 
 import { dlopen } from "bun:ffi";

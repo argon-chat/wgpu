@@ -1,69 +1,59 @@
 /**
  * The 40 exported wgpu-native symbols that **abort the process** when called.
  *
- * These are `unimplemented!()` stubs. Because the entry points are `extern "C"` — and therefore
- * `nounwind` — the Rust panic cannot unwind and is escalated to `abort`. There is no catchable
- * error, no status code, and no JS stack: the process dies, and everything else running in it dies
- * with it. Nothing distinguishes them from working functions beforehand; they are in the DLL's
- * export table and in `webgpu.h`, typed exactly like their neighbours.
+ * These are `unimplemented!()` stubs. The entry points are `extern "C"` and therefore `nounwind`, so
+ * the Rust panic cannot unwind and is escalated to `abort`: no catchable error, no status code, no
+ * JS stack — the process dies and takes everything with it. They are indistinguishable beforehand,
+ * sitting in the DLL's export table and in `webgpu.h`, typed exactly like their neighbours.
  *
  * ── The trap this sets for header-driven binding generation ─────────────────────────────────────
  *
  * `wgpuBufferReadMappedRange` and `wgpuBufferWriteMappedRange` are the **modern `webgpu.h`
- * spellings** for buffer access, so a binding generated faithfully from the header picks precisely
- * the two entry points that abort — and dies on its first pixel readback, which is the hot path of
- * essentially every GPU test in existence. The functions that actually work are the older
- * `wgpuBufferGetMappedRange` / `wgpuBufferGetConstMappedRange`. This package uses those, and
- * {@link assertImplemented} makes the wrong choice impossible to make by accident.
- *
- * The same shape applies to `wgpuGetInstanceFeatures` / `wgpuHasInstanceFeature` (probe features on
- * the *adapter* instead), to `wgpuShaderModuleGetCompilationInfo` (see the shader module's
- * error-scope fallback), and to `wgpuInstanceWaitAny` (there are no futures here — poll instead).
+ * spellings** for buffer access, so a binding generated faithfully from the header picks exactly the
+ * two entry points that abort — and dies on its first pixel readback, the hot path of nearly every
+ * GPU test. The functions that work are the older `wgpuBufferGetMappedRange` /
+ * `wgpuBufferGetConstMappedRange`; this package uses those, and {@link assertImplemented} makes the
+ * wrong choice impossible to make by accident. Same shape for `wgpuGetInstanceFeatures` /
+ * `wgpuHasInstanceFeature` (probe features on the *adapter* instead),
+ * `wgpuShaderModuleGetCompilationInfo` (see the shader module's error-scope fallback), and
+ * `wgpuInstanceWaitAny` (no futures here — poll instead).
  *
  * ── How this list was derived ───────────────────────────────────────────────────────────────────
  *
- * Two independent sources, because a single one is not trustworthy: the shipped DLL and the tagged
- * source can be different commits, and the export table is exactly the thing that misleads.
+ * Two independent sources, because one is not trustworthy: the shipped DLL and the tagged source can
+ * be different commits, and the export table is the thing that misleads.
  *
- * 1. **Behaviour-derived (primary).** Every exported symbol in the
- *    pinned headers was called once, in **its own subprocess**, with zeroed arguments; a symbol is
- *    a stub iff the child printed the Rust panic banner `not implemented`. This is sound because
- *    `unimplemented!()` is the first statement in these bodies — it fires before any argument is
- *    read — so a NULL handle cannot produce a false positive, and a working function cannot produce
- *    a false negative. Reproduce with `bun run scripts/derive-unimplemented.ts`, which also diffs
- *    its result against this list and exits non-zero on any drift.
- *
+ * 1. **Behaviour-derived (primary).** Every exported symbol in the pinned headers was called once,
+ *    in **its own subprocess**, with zeroed arguments; a symbol is a stub iff the child printed the
+ *    Rust panic banner `not implemented`. Reproduce with `bun run scripts/derive-unimplemented.ts`,
+ *    which diffs its result against this list, exits non-zero on drift, and documents why the
+ *    classification can produce neither a false positive nor a false negative.
  * 2. **Source-derived (cross-check).** `grep -rn 'unimplemented!' src/` at the pinned upstream tag,
  *    across the **whole crate** and not just `src/unimplemented.rs` — five of the forty live in
- *    `src/lib.rs`, including both `MappedRange` entry points, and a derivation that reads only the
+ *    `src/lib.rs`, including both `MappedRange` entry points, so a derivation that reads only the
  *    obviously-named file reports 35 and misses the two that matter most.
  *
  * The two agree at 40 for this pin, by execution: `bun run derive:aborts:probe` against the shipped
- * `v29.0.1.1` binary reproduces this list exactly, in about a minute. Re-run it on a pin bump; it
- * diffs against this list and exits non-zero on drift.
+ * `v29.0.1.1` binary reproduces this list exactly. Re-run it on a pin bump.
  *
- * ── Reading the list ────────────────────────────────────────────────────────────────────────────
- *
- * Twenty-one of the forty are `*SetLabel`. They look harmless — a `device.label = "x"` setter that
- * forwards naively turns a cosmetic line of test code into a process abort with a Rust backtrace
- * and no JS stack. This package therefore never forwards a label after creation; labels are only
- * ever passed *in descriptors at creation time*, where they work.
+ * ⚠ Twenty-one of the forty are `*SetLabel`, which look harmless: a `device.label = "x"` setter that
+ * forwards naively turns a cosmetic line of test code into a process abort with a Rust backtrace and
+ * no JS stack. So labels are never forwarded after creation — only passed *in descriptors at
+ * creation time*, where they work.
  *
  * ── Scope: this is wgpu-native's list, and only wgpu-native's ───────────────────────────────────
  *
  * Every name here was derived by executing **wgpu-native**. Dawn (`WGPU_BUN_IMPL=dawn`) is a
  * different implementation of the same header and has not been swept, so nothing here is a claim
- * about it — some of these very likely work there.
- *
- * That costs nothing, because the guard this module actually enforces is static and conservative:
- * {@link isUnimplemented} gates the *symbol table* (`src/ffi/symbols.ts`), which is shared by both
- * implementations, so a name that aborts under either one is simply never bound under either. The
- * package uses `wgpuBufferGetConstMappedRange` and friends, which both implementations support.
+ * about it — some of these very likely work there. That costs nothing: {@link isUnimplemented} gates
+ * the *symbol table* (`src/ffi/symbols.ts`), which both implementations share, so a name that aborts
+ * under either is never bound under either, and the package uses `wgpuBufferGetConstMappedRange` and
+ * friends, which both support.
  *
  * ⚠ The exported {@link isUnimplemented} / {@link assertImplemented} answer for wgpu-native even when
- * Dawn is loaded. Sweeping Dawn is a matter of pointing `scripts/derive-unimplemented.ts` at a Dawn
- * library — the sweep takes a library path and is implementation-agnostic — and the result would be
- * a second list, not an edit to this one.
+ * Dawn is loaded. To sweep Dawn, run `scripts/derive-unimplemented.ts` under `WGPU_BUN_IMPL=dawn`
+ * (it resolves whichever library the environment selects); the result would be a second list, not an
+ * edit to this one.
  */
 
 import { WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
@@ -71,24 +61,21 @@ import { WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
 /**
  * The generation a blocklisted symbol first **exists** in.
  *
- * The list below is the UNION across every supported generation, and the union is the right shape:
- * a symbol that does not exist in the loaded library cannot be called through `dlopen` anyway, so
- * blocklisting it there costs nothing and forgetting to blocklist it in the generation that *does*
- * export it costs a process.
+ * The list below is the UNION across every supported generation. A symbol absent from the loaded
+ * library cannot be called through `dlopen` anyway, so blocklisting it there costs nothing, while
+ * forgetting to blocklist it in the generation that *does* export it costs a process.
  *
- * These four were added to `webgpu.h` after v27. Recorded rather than dropped, because a test that
- * asserts "every blocklisted symbol is exported" is a real check — it is what catches a name that
- * upstream renamed, or a list transcribed from the wrong tag — and it can only stay a real check if
- * the legitimate absences are declared instead of tolerated.
+ * These four were added to `webgpu.h` after v27. Recorded rather than dropped: the test that asserts
+ * "every blocklisted symbol is exported" catches a name upstream renamed or a list transcribed from
+ * the wrong tag, and stays a real check only if legitimate absences are declared.
  *
  * @see test/abort-symbols.test.ts, which asserts exactly this partition against the loaded library.
  *
  * ⚠ **A list of records, not an object keyed by symbol name — and it must stay one.**
  * `test/abort-symbols.test.ts` treats *any* exported object in `src/ffi` whose keys look like
- * `wgpu*` as a symbol table and fails if a blocklisted name appears among them. That guard is what
- * stops a trap from being bound by accident, and it is right to be that blunt. Tidying this into a
- * `Record<string, number>` would trip it, and the correct response would be to change this shape
- * back rather than to teach the guard about exceptions.
+ * `wgpu*` as a symbol table and fails if a blocklisted name appears among them. That bluntness is
+ * what stops a trap being bound by accident. Tidying this into a `Record<string, number>` would trip
+ * it; the correct response would be to change the shape back, not to teach the guard exceptions.
  */
 export interface IGenerationBoundSymbol {
   /** The blocklisted symbol. */
@@ -184,9 +171,8 @@ export function isUnimplemented(symbol: string): boolean {
 /**
  * Throw a normal JS `Error` rather than letting the process die.
  *
- * Called on the way *in* to every blocked symbol. The whole value of this module is that the
- * failure arrives as a stack trace pointing at the caller instead of as a Rust backtrace on stderr
- * followed by exit code `0xC0000409`.
+ * Called on the way *in* to every blocked symbol, so the failure arrives as a stack trace pointing
+ * at the caller instead of a Rust backtrace on stderr followed by exit code `0xC0000409`.
  */
 export function assertImplemented(symbol: string, wgpuNativeVersion = WGPU_NATIVE_TAG): void {
   if (!BLOCKED.has(symbol)) return;

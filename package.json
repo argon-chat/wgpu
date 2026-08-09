@@ -1,6 +1,6 @@
 {
   "name": "wgpu-bun",
-  "version": "29.0.0",
+  "version": "29.1.0",
   "description": "WebGPU for Bun. A bun:ffi binding to wgpu-native, API-compatible with the `webgpu` package \u2014 headless compute and offscreen rendering, no canvas required.",
   "license": "MIT",
   "author": "Yuuki Wesp <y.wesp@argon.gl>",

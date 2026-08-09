@@ -3,37 +3,33 @@
  *
  * ── The problem ─────────────────────────────────────────────────────────────────────────────────
  *
- * Dawn loads two things dynamically on Windows, at the moment they are first needed rather than at
- * library load:
+ * Dawn loads two things dynamically on Windows, when first needed rather than at library load:
  *
  *   **D3D12** compiles WGSL to DXIL through DXC — `dxcompiler.dll` and `dxil.dll`.
  *   **Vulkan** goes through the loader, `vulkan-1.dll`.
  *
- * Google's release archive contains no DLLs at all, so neither travels with the library. Worse, both
- * failures land at `requestDevice()` or `requestAdapter()` rather than at load, as a Win32 error
- * number attached to a file name:
+ * Google's release archive contains no DLLs, so neither travels with the library, and both failures
+ * land at `requestDevice()` or `requestAdapter()` rather than at load, as a Win32 error number:
  *
  *     requestDevice failed (status 3) DynamicLib.Open: dxil.dll Windows Error: 87
  *     Warning: Couldn't load Vulkan: DynamicLib.Open: vulkan-1.dll Windows Error: 87
  *
  * ⚠ **That error 87 is `ERROR_INVALID_PARAMETER`, not "file not found"** — and it appears even for
- * `vulkan-1.dll`, which is in `System32` on every machine with a GPU driver and which this very
- * process can `dlopen` by name. Measured: `bun:ffi` loads it fine and wgpu-native's Vulkan backend
- * gets a real adapter in the same process a moment before Dawn says it cannot. Dawn resolves these
- * by a search that does not include the standard directories; putting a copy next to
- * `webgpu_dawn.dll` makes it work, which is the shape of a per-module search path.
+ * `vulkan-1.dll`, which is in `System32` on every machine with a GPU driver and which this process
+ * can `dlopen` by name. Measured: `bun:ffi` loads it fine and wgpu-native's Vulkan backend gets a
+ * real adapter in the same process a moment before Dawn says it cannot. Dawn resolves these by a
+ * search that excludes the standard directories; a copy next to `webgpu_dawn.dll` works, which is
+ * the shape of a per-module search path.
  *
  * ── The decision: redistribute nothing, copy nothing ────────────────────────────────────────────
  *
  * `dxil.dll` is closed-source Microsoft code — the shader-signing library, which only Microsoft can
- * produce. Putting it in an npm package would mean adopting someone else's redistribution terms and
- * adding a binary to the supply chain that this repository can neither build nor verify, in a
- * package whose entire pitch is that every binary is traceable to a pin. `vulkan-1.dll` belongs to
- * the user's driver installation. Neither is ours to ship.
- *
- * Copying them beside the library at install time was the other candidate and is worse: this package
- * has **no postinstall hook** on purpose (see docs/PACKAGING.md), and writing files into
- * `node_modules` at runtime is not a thing a GPU binding should do.
+ * produce. Shipping it would mean adopting someone else's redistribution terms and adding a binary
+ * this repository can neither build nor verify, in a package whose pitch is that every binary is
+ * traceable to a pin. `vulkan-1.dll` belongs to the user's driver installation. Neither is ours.
+ * Copying them beside the library at install time is worse: this package has **no postinstall hook**
+ * on purpose (see docs/PACKAGING.md), and writing into `node_modules` at runtime is not something a
+ * GPU binding should do.
  *
  * So: **preload what is already on the machine, by absolute path, before Dawn asks.** Once a module
  * is resident, Dawn's own search finds it. Measured, both paths, on a real device:
@@ -41,8 +37,8 @@
  *   - preload `System32\vulkan-1.dll` → Dawn's Vulkan backend reports NVIDIA RTX 5070, no copies;
  *   - preload the Windows SDK's `dxil.dll` + `dxcompiler.dll` → Dawn's D3D12 backend, same device.
  *
- * Nothing is installed, nothing is copied, and a machine that has neither gets an error naming both
- * options instead of a Win32 number.
+ * Nothing is installed or copied, and a machine with neither gets an error naming both options
+ * instead of a Win32 number.
  */
 
 import { dlopen, FFIType } from "bun:ffi";
@@ -52,10 +48,8 @@ import * as path from "node:path";
 import { DAWN_WINDOWS_RUNTIME_FILES, DAWN_WINDOWS_VULKAN_LOADER } from "../dawn.manifest.ts";
 
 /**
- * Handles kept for the life of the process.
- *
- * The point of the preload is that the module stays resident, so these must not be collected. A
- * module-level array is the whole mechanism.
+ * Handles kept for the life of the process. The preload only works if the modules stay resident, so
+ * these must not be collected — this array is the whole mechanism.
  */
 const resident: unknown[] = [];
 
@@ -66,7 +60,7 @@ interface IDependency {
 }
 
 // File names from the manifest, so the record of *what Dawn needs* and the code that finds it cannot
-// drift — the same rule the rest of this package follows for pins.
+// drift.
 const VULKAN: IDependency = { file: DAWN_WINDOWS_VULKAN_LOADER, symbol: "vkGetInstanceProcAddr" };
 const DXC: readonly IDependency[] = DAWN_WINDOWS_RUNTIME_FILES.map((file) => ({
   file,
@@ -119,19 +113,19 @@ export interface IDawnWindowsDeps {
 /**
  * Keyed by the directory searched, not a single slot.
  *
- * The preload must happen once per process — that is the whole mechanism — but *what was found* is a
- * function of where it looked. A single cached answer makes the first caller's directory the answer
- * for every later one, which is wrong the moment two libraries are involved and was wrong
- * immediately in the test that asks what a different directory would yield.
+ * The preload must happen once per process, but *what was found* depends on where it looked. A
+ * single cached answer would make the first caller's directory the answer for every later one —
+ * wrong as soon as two libraries are involved, and wrong immediately in the test that asks what a
+ * different directory would yield.
  */
 const cache = new Map<string, IDawnWindowsDeps>();
 
 /**
  * Make Dawn's Windows dependencies resident, from wherever they already are on this machine.
  *
- * Called once, before the instance is created. On any other platform, or under wgpu-native, this is
- * not reached: wgpu-native links its D3D12 path without DXC and loads Vulkan through the normal
- * search, so neither problem exists there.
+ * Called once per library directory, before the first `requestAdapter()`. Not reached on any other
+ * platform or under wgpu-native, which links its D3D12 path without DXC and loads Vulkan through the
+ * normal search.
  */
 export function preloadDawnWindowsDeps(libDir: string): IDawnWindowsDeps {
   const hit = cache.get(libDir);
@@ -172,7 +166,7 @@ export function preloadDawnWindowsDeps(libDir: string): IDawnWindowsDeps {
  * What to tell someone whose machine has neither.
  *
  * Both options, both actionable, and an explicit statement that this package does not ship them —
- * otherwise the obvious reading of a missing DLL is that the install is broken.
+ * otherwise a missing DLL reads as a broken install.
  */
 export function dawnWindowsDepsMessage(deps: IDawnWindowsDeps): string {
   return (

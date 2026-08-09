@@ -15,7 +15,8 @@
 #   ⚠ **`repository.url` in each package.json must match this GitHub repository**, exactly. Same
 #     failure mode: an unhelpful authorization error rather than a mismatch message. There are N+1
 #     package.json files here (the root plus one per platform), so this is N+1 chances to get it
-#     wrong. `bun run release:check` refuses to proceed when the root's is missing.
+#     wrong — one per platform package, wgpu-native and Dawn alike. `bun run release:check` refuses
+#     to proceed when the root's is missing.
 #
 # **Provenance is automatic.** Publishing via trusted publishing from a public repository to a public
 # package makes npm generate and publish the attestation itself. Do **not** pass `--provenance`; it
@@ -27,24 +28,26 @@
 #
 # ── One-time setup, per package ─────────────────────────────────────────────────────────────────
 #
-# On npmjs.com, for the root package `wgpu-bun` **and for each `@wgpu-bun/<rid>`**:
+# On npmjs.com, for the root package `wgpu-bun`, for each `@wgpu-bun/<rid>` **and for each
+# `@wgpu-bun/<rid>-dawn`**:
 #   1. Settings → Trusted publisher → GitHub Actions.
 #   2. Owner + repository + workflow filename `release.yml` (+ environment, if one is set below).
 #   3. Select the allowed action explicitly — configurations created after 2026-05-20 do not
 #      default to `npm publish`, and one created without a selection publishes nothing.
 #   4. Confirm the package's `repository.url` matches.
 #
-# That is five configurations for four platforms. It is a one-time cost multiplied by the number of
-# packages, and it is exactly the kind of thing that gets half-done: a root package that publishes
-# and platform packages that 403, which surfaces as an install that resolves nothing.
+# That is eight configurations: the root, four wgpu-native platform packages and three Dawn ones,
+# all published by the loop at the end of this file. A one-time cost multiplied by the number of
+# packages, and exactly the kind of thing that gets half-done: a root package that publishes and a
+# platform package that 403s mid-loop, which surfaces as an install that resolves nothing.
 #
 # ── What gates a release ────────────────────────────────────────────────────────────────────────
 #
-# Deliberately NOT the GPU matrix. GPU coverage lives in `ci.yml`, where legs are permitted to skip
-# on runners that have no device — so making this workflow depend on it would either block releases
-# on an environment nobody controls, or accept a skipped leg as a pass. Neither is acceptable, so
-# they are separated: `ci.yml` owns "does it work", this workflow owns "is it publishable", and the
-# link between them is a branch protection rule requiring `ci` to be green on the release commit.
+# Deliberately NOT the GPU matrix. That matrix needs runners with real devices, and gating a publish
+# on hardware availability makes releases hostage to an environment nobody here controls. So they are
+# separated: `ci.yml` owns "does it work" — and no leg there is allowed to skip, `allow_no_adapter` is
+# "0" on all four — while this workflow owns "is it publishable". The link between them is a branch
+# protection rule requiring `ci` to be green on the release commit.
 
 name: release
 
@@ -73,9 +76,10 @@ jobs:
   # from the one CI actually tests with. Building each on its matching runner costs four cheap jobs
   # and removes the whole question.
   #
-  # It is built for all four platforms, not only for `linux-x64` where the ABI requires it. See
-  # `shim.manifest.ts` for why: preferring the shim uniformly is what makes the SysV path something
-  # that has been executed rather than something that has been reasoned about.
+  # It is built for all four platforms, not only the three whose ABI requires it (`linux-x64`,
+  # `linux-arm64`, `darwin-arm64` — only Win64 has a correct direct path). See `shim.manifest.ts`:
+  # preferring the shim uniformly is what makes the shipped calling path one that has been executed
+  # rather than one that has been reasoned about.
   shim:
     name: shim (${{ matrix.rid }})
     runs-on: ${{ matrix.runner }}
@@ -169,9 +173,9 @@ jobs:
       - run: bun run derive:aborts:source -- --check
 
       - name: Collect the per-platform shims
-        # Before the tests, not after. This runner is linux-x64 — the one ABI that cannot work
-        # without the shim — so downloading first means `bun test` exercises the shim path here
-        # rather than recording a permitted `abi-unsupported` skip.
+        # Before the tests, not after. This runner is linux-x64 — an ABI that cannot work without
+        # the shim — so downloading first means `bun test` exercises the shim path here rather than
+        # recording a permitted `abi-unsupported` skip.
         uses: actions/download-artifact@v4
         with:
           pattern: shim-*

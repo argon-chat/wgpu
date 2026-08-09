@@ -3,82 +3,70 @@
  *
  * ══ 1. Userdata is a monotonic integer ticket. Never an address. Never a recycled buffer. ══
  *
- * This is the single most important decision in the package, and it is a direct response to how the
- * other Bun WebGPU binding fails. That binding hands the C side a **pooled `ArrayBuffer`, keyed by
- * object identity**, and releases it by looking the object up in a `Map`. Two failures follow from
- * that shape and only one of them is visible:
+ * The most important decision in the package, and a direct response to how the other Bun WebGPU
+ * binding fails. That binding hands the C side a **pooled `ArrayBuffer`, keyed by object identity**,
+ * and releases it by looking the object up in a `Map`. Two failures follow, only one visible:
  *
  *   - a second release throws `"was not allocated from this allocator or already freed"` — the
  *     crash people actually see, and the *lucky* outcome;
- *   - blocks are **recycled**, so a late or duplicate native callback writes into a block that has
- *     since been handed to a different in-flight request. Silent cross-request corruption. No
- *     throw, no crash, just a wrong answer somewhere else.
+ *   - blocks are **recycled**, so a late or duplicate native callback writes into a block since
+ *     handed to a different in-flight request. Silent cross-request corruption: no throw, no crash,
+ *     just a wrong answer somewhere else.
  *
- * The root cause is using a *reused, address-identified, GC-owned object* as the correlation token.
- * Any scheme that gives C a pointer to something JavaScript manages has this bug latent in it.
- *
- * So: **the C side receives an integer that names nothing.** Why each property is load-bearing —
+ * The root cause is a *reused, address-identified, GC-owned object* as the correlation token. Any
+ * scheme that gives C a pointer to something JavaScript manages has this bug latent in it. So:
+ * **the C side receives an integer that names nothing.** Each property is load-bearing —
  *
  * | Property | What it makes impossible |
  * |---|---|
  * | an **integer**, not a pointer | C holds no reference to JS-owned memory, so there is nothing to keep alive across the call and nothing the GC can invalidate. Bun never promises that `ptr()` pins a buffer; treating it as unpinned is the only safe reading. |
- * | **monotonic, never reused** | the recycled-block corruption above. A stale callback can only ever name a ticket that is already gone, and "already gone" is the one state that is safe. |
+ * | **monotonic, never reused** | the recycled-block corruption above. A stale callback can only name a ticket that is already gone, and "already gone" is the one state that is safe. |
  * | `Map.delete` **before** invoking the settler | double-settle *and* re-entrancy. wgpu-native fires callbacks synchronously, inside the very call that armed them, so the settler may issue another WebGPU call whose callback fires nested — by then the entry is gone and the nested dispatch cannot see it. |
  * | an unknown ticket **returns**, never throws | the exact crash above. A callback arriving after teardown is a *normal* condition, not an invariant violation. |
  * | `arm()` **before** the native call | measured: callbacks fire re-entrantly inside `wgpuInstanceRequestAdapter`, even with a callback mode that by spec forbids it. Registering afterwards is a race that loses on the first attempt. |
  *
- * Structurally there is no allocator here and nothing to free — the only resource is a `Map` entry,
- * and `delete` on an absent key is a no-op by language semantics rather than by our carefulness.
- * That is what "double-free is impossible" has to mean: not "we are careful", but "there is no
- * free".
+ * There is no allocator here and nothing to free — the only resource is a `Map` entry, and `delete`
+ * on an absent key is a no-op by language semantics rather than by our carefulness. "Double-free is
+ * impossible" means "there is no free", not "we are careful".
  *
  * ══ 2. Async is polled, not awaited — and *whose* job the pump is ══
  *
  * Futures do not exist in this build. `wgpuInstanceWaitAny` is an `unimplemented!()` stub that
  * aborts the process, `WGPUFuture.id` is always 0, and timed waits report
- * `Unsupported timed WaitAny features specified`. The only mechanisms that make progress are
- * `wgpuInstanceProcessEvents` and `wgpuDevicePoll`.
+ * `Unsupported timed WaitAny features specified`. Only `wgpuInstanceProcessEvents` and
+ * `wgpuDevicePoll` make progress.
  *
- * The pump belongs to **the await itself**, driven by the pending-ticket set. The alternatives were
- * considered and rejected:
+ * The pump belongs to **the await itself**, driven by the pending-ticket set. Rejected alternatives:
  *
  *   - an internal `setInterval` — makes settle latency a race against a clock, keeps the event loop
- *     alive, and *decouples pumping from awaiting*, which is precisely the decoupling that produces
- *     a vacuously-empty error scope;
+ *     alive, and *decouples pumping from awaiting*, which is exactly what produces a
+ *     vacuously-empty error scope;
  *   - an explicit `device.poll()` the caller must remember — "correct only if the caller remembers"
  *     is how the silent-green failure gets written in the first place.
  *
- * **Validation errors are delivered only on poll.** That makes this more than an ergonomics
- * question: an error scope that resolves without having pumped reports *no error* for an operation
- * that genuinely failed, and a scope that recorded nothing satisfies every assertion built on it
- * vacuously. No type gate, no lint and no assertion count can see that — the test passes for the
- * same reason a test with no assertions passes. It is worse than a crash, because a crash is a bug
- * report and this is a false negative that hides other bugs behind it.
- *
- * {@link settle} therefore makes the guarantee structural rather than remembered:
+ * **Validation errors are delivered only on poll**, so this is not an ergonomics question: a scope
+ * that resolves without having pumped reports *no error* for an operation that genuinely failed, and
+ * a scope that recorded nothing satisfies every assertion built on it vacuously. No type gate, lint
+ * or assertion count can see that — the test passes for the same reason a test with no assertions
+ * passes. {@link settle} therefore makes the guarantee structural rather than remembered:
  *
  * > **An async result is produced only by its native callback.** No default value, no sentinel, no
  * > "resolve as success if nothing arrived". If the callback has not fired, the operation has not
  * > completed. `popErrorScope()` goes through `settle()` like everything else, so it cannot
  * > physically resolve before wgpu-native has delivered its verdict.
  *
- * There **is** a deadline, and the distinction it rests on is worth stating precisely: after it
- * expires `settle` *throws*, it does not resolve. The guarantee above is about never inventing an
- * answer, and a thrown error invents nothing — refusing to answer and answering wrongly are
- * different acts, and only the second was ever the thing to protect against.
- *
- * An earlier revision had no deadline, on the reasoning that a hang is the honest failure and a test
- * runner's timeout would catch it. That reasoning did not survive contact: the first CI run to reach
- * this code on AArch64 sat inside `requestAdapter` until the job's own limit, produced no diagnosis,
- * and burned a runner. A hang does not say *which* call stalled, and on an unattended machine it is
- * indistinguishable from slow work.
+ * There **is** a deadline, and after it expires `settle` *throws* — it does not resolve, so it still
+ * invents nothing. An earlier revision had none, on the reasoning that a hang is the honest failure
+ * and a test runner's timeout would catch it. The first CI run to reach this code on AArch64 sat
+ * inside `requestAdapter` until the job's own limit, produced no diagnosis, and burned a runner. A
+ * hang does not say *which* call stalled, and on an unattended machine it looks like slow work.
  *
  * ══ 3. One `JSCallback` per signature, for the life of the process ══
  *
- * Not one per call. A per-call `JSCallback` would reintroduce a lifetime problem in a new place —
- * exactly the thing part 1 exists to eliminate. `threadsafe` is deliberately off: wgpu-native's
- * callbacks are all `void` and fire on the calling thread inside the pump, and Bun's thread-safe
- * mode marshals asynchronously and requires the C side to ignore the return value.
+ * Not one per call: a per-call `JSCallback` would reintroduce the lifetime problem part 1 exists to
+ * eliminate. `threadsafe` is deliberately off — wgpu-native's callbacks are all `void` and fire on
+ * the calling thread inside the pump, while Bun's thread-safe mode marshals asynchronously and
+ * requires the C side to ignore the return value.
  */
 
 import { FFIType, JSCallback } from "bun:ffi";
@@ -158,16 +146,11 @@ const { ptr, u32, u64, void: v } = FFIType;
  *
  * For the 40-byte case SysV is the outlier. For the 16-byte case **Win64 is the outlier and the
  * other three agree.** Declaring `message` as a single pointer — the {@link POINTER_FORM} below — is
- * therefore correct on Windows and wrong on `linux-x64`, `linux-arm64` and `darwin-arm64` alike,
- * where the callee reads `ud1` out of the register holding `message.length`.
+ * therefore correct on Windows and wrong on `linux-x64`, `linux-arm64` and `darwin-arm64`, where the
+ * callee reads `ud1` out of the register holding `message.length`. That shipped once and hung inside
+ * `requestAdapter` on all three; `src/ffi/abiSeam.ts` has the full account.
  *
- * The consequence is not a crash. The ticket comes back as garbage, {@link dispatch} does the right
- * thing with an unknown ticket — ignores it, because a late callback is normal — and the promise
- * simply never settles. It presents as a hang inside `requestAdapter` on three platforms at once,
- * with nothing anywhere reporting an ABI problem. That is exactly what happened, and it survived
- * every local run because the one platform available locally was the one it was right on.
- *
- * So the shape is not chosen by reasoning any more. It is chosen by *who is decoding the aggregate*:
+ * So the shape is no longer chosen by reasoning, but by *who is decoding the aggregate*:
  *
  *   - **{@link FLAT_FORM}** — `(…, msgData, msgLen, ud1, ud2)`. Used whenever the shim is bound. The
  *     shim's C trampolines take the aggregate with its real prototype and split it, so the compiler
@@ -179,17 +162,14 @@ const { ptr, u32, u64, void: v } = FFIType;
 /**
  * ══ Every `JSCallback` in this package is constructed here ══
  *
- * Not a stylistic preference — a containment boundary. Choosing a callback's argument shape *is*
- * answering an ABI question, and the question has been got wrong twice, both times at a site a
- * previous sweep did not cover. The second pair (`uncapturedError`, `deviceLost`) lived in
- * `src/api/device.ts` because that is where the state they need lives, and they were invisible to a
- * search of the seam.
- *
- * So the state comes to the callback instead of the callback going to the state: modules register a
- * **handler** — plain JavaScript, no FFI types, no ABI decisions — and this module owns the one
- * place where a C signature is declared. `test/abi-seam.test.ts` asserts that `src/` contains no
- * other `new JSCallback`, which is what makes "there is no third site" a checked property rather
- * than a claim.
+ * A containment boundary, not a style preference. Choosing a callback's argument shape *is*
+ * answering an ABI question, and that question has been got wrong twice, both times at a site a
+ * previous sweep did not cover: the second pair (`uncapturedError`, `deviceLost`) lived in
+ * `src/api/device.ts`, next to the state they need, invisible to a search of the seam. So the state
+ * comes to the callback instead: modules register a **handler** — plain JavaScript, no FFI types, no
+ * ABI decisions — and this module owns the one place a C signature is declared.
+ * `test/abi-seam.test.ts` asserts `src/` contains no other `new JSCallback`, which makes "there is
+ * no third site" a checked property rather than a claim.
  */
 
 /** A device-scoped native callback, after this module has decoded it. */
@@ -215,11 +195,10 @@ let unmatchedDeviceCallbacks = 0;
 /**
  * Route a decoded device callback, and notice when it matches nothing.
  *
- * The `?.`-style miss is how the last ABI defect stayed invisible: an id that names no live device
- * is *safe* — it must be, a callback can arrive after teardown — and safety here reads exactly like
- * correctness. So the miss is counted and reported once. A handful after `destroy()` is ordinary;
- * one on the very first uncaptured error is the signature of an argument shift, and that is the
- * sentence worth having on stderr rather than reconstructing later.
+ * The `?.`-style miss is how the last ABI defect stayed invisible: an id naming no live device is
+ * *safe* — it must be, a callback can arrive after teardown — and safety here reads exactly like
+ * correctness. So misses are counted and reported once. A handful after `destroy()` is ordinary; one
+ * on the very first uncaptured error is the signature of an argument shift.
  *
  * Never throws: this frame returns into Rust across a `nounwind` boundary, where an exception is
  * undefined behaviour rather than a stack trace.
@@ -278,9 +257,9 @@ const PTR_ARGS_DEVICE = [ptr, u32, ptr, u64, u64] as const;
 /**
  * The flat callbacks, matching the shim's trampoline prototypes.
  *
- * Built lazily and never closed: they live exactly as long as the process, which is the only
- * lifetime definitely longer than any in-flight native operation. Closing one while wgpu-native
- * still holds the pointer would be a use-after-free in the other direction.
+ * Built lazily and never closed: process lifetime is the only lifetime definitely longer than any
+ * in-flight native operation. Closing one while wgpu-native still holds the pointer would be a
+ * use-after-free in the other direction.
  */
 const FLAT_FORM: Record<CallbackSlot, () => JSCallback> = {
   requestAdapter: () =>
@@ -400,9 +379,9 @@ const installedAddress = new Map<CallbackSlot, number>();
 /**
  * The address to write into `WGPUCallbackInfo.callback` for a given operation.
  *
- * Single entry point on purpose. Choosing the callback *shape* and choosing the calling *path* are
- * the same decision, and the previous arrangement — a `callbacks.requestAdapter` property that knew
- * nothing about the seam — is what allowed one shape to be used on four ABIs.
+ * Single entry point on purpose: callback *shape* and calling *path* are one decision. The previous
+ * arrangement — a `callbacks.requestAdapter` property that knew nothing about the seam — is what
+ * allowed one shape to be used on four ABIs.
  */
 export function callbackAddress(slot: CallbackSlot): number {
   const cached = installedAddress.get(slot);
@@ -437,11 +416,10 @@ export function processEvents(instance: Ptr): void {
  * what makes a synchronous readback tractable; it returns immediately when the queue is empty.
  */
 export function devicePoll(device: Ptr, wait: boolean): void {
-  // Dawn has no device poll — the entry point does not exist in its C API, and its equivalent is
-  // `wgpuInstanceProcessEvents`, which every call site here already calls on the next line. So this
-  // is a no-op rather than an emulation: the delivery happens in `processEvents`, and the waiting
-  // happens in the caller's spin, which is where it happened under wgpu-native too whenever the
-  // blocking form was not available.
+  // Dawn has no device poll — the entry point does not exist in its C API. Its equivalent is
+  // `wgpuInstanceProcessEvents`, which every call site here already calls on the next line, so this
+  // is a no-op rather than an emulation: delivery happens in `processEvents` and waiting happens in
+  // the caller's spin, as it did under wgpu-native whenever the blocking form was unavailable.
   if (currentImpl() === "dawn") return;
   if (device) wgpu().wgpuDevicePoll(device, wait ? 1 : 0, null);
 }
@@ -450,9 +428,9 @@ export function devicePoll(device: Ptr, wait: boolean): void {
  * Yield so JS timers and microtasks can run between pumps.
  *
  * Microtasks for the first {@link MICROTASK_SPINS} iterations — wgpu-native's callbacks fire
- * synchronously inside the pump, so the common case settles in one or two turns and a macrotask
- * hop would add milliseconds to every await. After that, hand control to the macrotask queue: a
- * genuinely stuck operation must not starve the timer a test runner uses to notice the hang.
+ * synchronously inside the pump, so the common case settles in one or two turns and a macrotask hop
+ * would add milliseconds to every await. After that, the macrotask queue: a genuinely stuck
+ * operation must not starve the timer a test runner uses to notice the hang.
  */
 const MICROTASK_SPINS = 64;
 function yieldTurn(spin: number): Promise<void> {
@@ -467,22 +445,10 @@ function yieldTurn(spin: number): Promise<void> {
  * @param pump   what to call each turn to give wgpu-native a chance to deliver.
  * @param begin  issues the native call, having been handed the ticket to embed in `userdata1`.
  *
- * The only way to a RESULT is the callback firing — there is no default, no sentinel and no
- * "assume success after N turns". That is the property that keeps an unpumped operation from
- * reporting "no error" for a case that genuinely failed.
- *
- * ── Why there is nonetheless a deadline ─────────────────────────────────────────────────────────
- *
- * An earlier revision had no exit at all, on the reasoning that a hang is the honest failure. In
- * practice it is not: the first CI run to reach this code on AArch64 sat in `requestAdapter` until
- * the job's own limit, produced no diagnosis, and burned a runner for hours. A hang tells you
- * nothing about WHICH call stalled, and on a machine nobody is watching it is indistinguishable
- * from slow.
- *
- * Throwing after a deadline keeps the property that matters — this function still never invents a
- * result — while turning "stuck forever, cause unknown" into a named, actionable failure. The
- * distinction is between refusing to answer and answering wrongly; only the second was ever the
- * thing to protect against.
+ * The only way to a RESULT is the callback firing — no default, no sentinel, no "assume success
+ * after N turns". That is what keeps an unpumped operation from reporting "no error" for a case that
+ * genuinely failed. The deadline throws rather than resolving, so it still invents nothing; see the
+ * module header for why a plain hang was not good enough.
  */
 const SETTLE_DEADLINE_MS = 30_000;
 
@@ -491,17 +457,11 @@ const SETTLE_DEADLINE_MS = 30_000;
  *
  * Its own class, for the same reason `AbiUnsupportedError` is: **"the callback never came" and "this
  * machine has no GPU" are different facts**, and the test gate previously filed this one under
- * `no-adapter`. That was wrong twice over. It named the wrong subsystem — the adapter was present
- * and enumerable on every runner that hit it — and `no-adapter` is *escapable* by an environment
- * variable two CI legs are granted, so a genuine completion defect could be skipped past in silence
- * on the legs most likely to have it.
- *
- * The defect this class was created for turned out to be an ABI one after all: the callback's
- * by-value `WGPUStringView` parameter was declared as a pointer, correct on Win64 and wrong on the
- * other three platforms, so the correlation ticket arrived as garbage and {@link dispatch} correctly
- * ignored it. But the *category* is worth keeping separate regardless of that particular cause — a
- * driver that genuinely never answers produces the identical symptom, and the gate should not have
- * to guess which it is looking at.
+ * `no-adapter` — wrong twice over, because the adapter was present and enumerable on every runner
+ * that hit it, and because `no-adapter` is *escapable* by an environment variable two CI legs are
+ * granted, so a genuine completion defect could be skipped past in silence on the legs most likely
+ * to have it. The cause turned out to be the ABI defect above, but the *category* stays separate: a
+ * driver that never answers produces the identical symptom.
  */
 export class CallbackDeadlineError extends Error {
   override readonly name = "CallbackDeadlineError";

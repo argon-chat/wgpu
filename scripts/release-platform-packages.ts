@@ -5,21 +5,12 @@
  * ── Why sub-packages and not a postinstall hook ─────────────────────────────────────────────────
  *
  * **`bun install` does not run lifecycle scripts of installed dependencies.** That is a deliberate
- * supply-chain defence, not a bug, and unblocking it requires the *consumer* to add this package to
- * `trustedDependencies` or run `bun pm trust`. There is a built-in allowlist of well-known packages;
- * a new one is obviously not on it.
- *
- * Worse, the failure is silent. Bun installs the package, skips the hook, reports success — and the
- * user meets a library-not-found error at runtime that points nowhere near the cause. For a package
- * whose primary audience *is* Bun users, being broken-by-default on Bun, silently, is not shippable.
- *
- * So: `optionalDependencies` with `os`/`cpu` fields, the pattern esbuild, swc, sharp and
- * `bun-webgpu` all use. No install scripts anywhere. It survives `--ignore-scripts`, is
- * integrity-checked by the registry itself, installs from a warm cache offline, and needs no egress
- * to GitHub releases from networks where only a mirrored npm registry is reachable.
- *
- * The cost is publishing N+1 packages instead of 1. That is a one-time release-process cost, not a
- * per-user tax, which is why it wins.
+ * supply-chain defence, and unblocking it requires the *consumer* to add this package to
+ * `trustedDependencies` or run `bun pm trust`; Bun's built-in allowlist covers well-known packages,
+ * and a new one is not on it. ⚠ The failure is easy to miss: Bun prints `Blocked 1 postinstall.` and
+ * still reports overall success, and the user meets a library-not-found error at runtime pointing
+ * nowhere near the cause. So: `optionalDependencies` with `os`/`cpu` fields, and no install scripts
+ * anywhere. Full argument in docs/PACKAGING.md.
  *
  * ── What this script does ───────────────────────────────────────────────────────────────────────
  *
@@ -31,13 +22,10 @@
  *
  * Staging a wgpu-native RID requires **two** libraries under `vendor/<rid>/lib/`: upstream's
  * wgpu-native, from `bun run fetch --rid <rid>`, and this project's ABI shim, from
- * `bun run shim:build --rid <rid>`.
- *
- * Those two have different portability. wgpu-native cross-fetches happily — it is a file download,
- * so one machine can stage every platform. The shim is compiled here, and cross-linking a `cdylib`
- * for four targets from one host means four target toolchains; the release workflow instead builds
- * each on its matching runner and collects the artefacts. So a release does need four machines, for
- * exactly one of the two artefacts.
+ * `bun run shim:build --rid <rid>`. They differ in portability: wgpu-native is a file download, so
+ * one machine can stage every platform, while the shim is compiled here and cross-linking a `cdylib`
+ * for four targets from one host means four target toolchains. The release workflow therefore builds
+ * each on its matching runner — a release needs four machines, for one of the two artefacts.
  *
  * ── Two implementations, two families of package ────────────────────────────────────────────────
  *
@@ -45,10 +33,10 @@
  * because `dawn:link` fuses the same shim objects into the Dawn library itself. Three platforms
  * rather than four — Google publishes no arm64 Linux build.
  *
- * The asymmetry that matters is in delivery, not in contents: **the Dawn packages are never wired
- * into `optionalDependencies`.** An optional dependency installs by default, and a consumer who
- * never types `WGPU_BUN_IMPL=dawn` should not be downloading a second WebGPU implementation. So
- * `--wire` refuses `--impl dawn` outright rather than quietly doing something reasonable-looking.
+ * The asymmetry is in delivery: **the Dawn packages are never wired into `optionalDependencies`.**
+ * An optional dependency installs by default, and a consumer who never types `WGPU_BUN_IMPL=dawn`
+ * should not be downloading a second WebGPU implementation. `--wire` therefore refuses `--impl dawn`
+ * outright rather than quietly doing something reasonable-looking.
  */
 import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
@@ -78,9 +66,9 @@ export const SCOPE = "@wgpu-bun";
 /**
  * Package name for a RID: `@wgpu-bun/win32-x64`, or `@wgpu-bun/win32-x64-dawn`.
  *
- * Delegated to the resolver rather than spelled again here. This name is a contract between two
- * pieces of code that never meet — the publisher and `import.meta.resolve` at runtime — and the only
- * way to be sure they agree is for there to be one function.
+ * Delegated to the resolver rather than spelled again here: the name is a contract between two
+ * pieces of code that never meet — the publisher, and `import.meta.resolve` at runtime — so there
+ * must be exactly one function producing it.
  */
 export function platformPackageName(rid: Rid, impl: WgpuImpl = "wgpu-native"): string {
   return npmPackageFor(rid, impl);
@@ -95,16 +83,12 @@ export function cpuOf(rid: Rid): string {
 /**
  * Filename of the upstream licence text that must travel with every redistributed binary.
  *
- * **Upstream's release archives contain no licence file** — verified against
+ * ⚠ **Upstream's release archives contain no licence file** — verified against
  * `wgpu-windows-x86_64-msvc-release.zip` at the pinned tag, which holds exactly `include/`, `lib/`
- * and `wgpu-native-meta/` and nothing else. So a package that ships the DLL is redistributing
- * MIT / Apache-2.0 licensed bytes with no accompanying terms, which is a licence violation and not
- * merely untidy.
- *
- * The text therefore has to be committed here, copied verbatim from the wgpu-native repository at
- * the pinned tag. It is not generated: a script that synthesised a licence would be inventing a
- * copyright line, and getting that wrong is worse than having no file at all. Preflight refuses to
- * proceed without it.
+ * and `wgpu-native-meta/`. A package that ships the DLL without this is redistributing MIT /
+ * Apache-2.0 bytes with no accompanying terms: a licence violation, not untidiness. So the text is
+ * committed here, copied verbatim from the wgpu-native repository at the pinned tag, and not
+ * generated — a synthesised licence would invent a copyright line. Preflight refuses without it.
  */
 export const UPSTREAM_LICENSE_FILE = "LICENSE-WGPU-NATIVE";
 
@@ -113,22 +97,21 @@ export const UPSTREAM_LICENSE_FILE = "LICENSE-WGPU-NATIVE";
  *
  * Google's release archive holds exactly `bin/`, `include/` and `lib/` — no licence text either — so
  * a package shipping `webgpu_dawn` without this redistributes BSD-3-Clause bytes bare. Copied
- * verbatim from the Dawn repository at {@link DAWN_COMMIT}; the file is upstream's own, sectioned by
- * `Files:` globs, and is committed rather than generated for the same reason as wgpu-native's.
+ * verbatim from the Dawn repository at {@link DAWN_COMMIT}: upstream's own file, sectioned by
+ * `Files:` globs, committed rather than generated for the same reason as wgpu-native's.
  *
- * ⚠ It covers Dawn and Tint. The linked library also contains vendored third parties — abseil,
+ * ⚠ It covers Dawn and Tint only. The linked library also contains vendored third parties — abseil,
  * SPIRV-Tools and others — whose notices live in their own `third_party/` subtrees upstream and
- * cannot be enumerated from a binary here. The platform README says so and points at the tree rather
- * than implying this one file is the whole picture.
+ * cannot be enumerated from a binary here; the platform README points at that tree.
  */
 export const DAWN_LICENSE_FILE = "LICENSE-DAWN";
 
 /**
  * Everything that differs between the two implementations when packaging them.
  *
- * A table rather than branches at each site: the failure this guards against is a partial edit —
- * remembering the library name and forgetting the version stamp, or the include directory, or the
- * licence — which produces a package that installs and then cannot be resolved at runtime.
+ * A table rather than branches at each site, because the failure it guards against is a partial edit
+ * — the library name remembered, the version stamp or include directory or licence forgotten —
+ * which produces a package that installs and then cannot be resolved at runtime.
  */
 interface IImplPackaging {
   readonly impl: WgpuImpl;
@@ -182,10 +165,10 @@ const PACKAGING: Readonly<Record<WgpuImpl, IImplPackaging>> = {
 /**
  * The `package.json` of one platform package.
  *
- * The `exports` map is load-bearing and easy to omit. `src/resolve.ts` locates the library with
+ * ⚠ The `exports` map is load-bearing and easy to omit. `src/resolve.ts` locates the library with
  * `import.meta.resolve('@wgpu-bun/<rid>/lib/<file>')`, and a package with no `exports` map — or one
- * that only names `"."` — makes that deep specifier unresolvable. The package would install
- * correctly and still be invisible.
+ * naming only `"."` — makes that deep specifier unresolvable: it installs correctly and stays
+ * invisible.
  */
 export function platformPackageManifest(
   rid: Rid,
@@ -202,9 +185,9 @@ export function platformPackageManifest(
       impl === "dawn"
         ? `Dawn ${DAWN_TAG} with the wgpu-bun ABI shim ${SHIM_VERSION} linked in, for ${rid}. Opt-in; select it with WGPU_BUN_IMPL=dawn.`
         : `wgpu-native ${WGPU_NATIVE_TAG} and the wgpu-bun ABI shim ${SHIM_VERSION} for ${rid}. Installed automatically by wgpu-bun.`,
-    // The package is almost entirely someone else's binary, so the SPDX expression is the upstream
-    // project's, not this repository's. Declaring MIT alone would understate the terms a consumer is
-    // actually accepting. Dawn's linked library is BSD-3-Clause with Apache-2.0 components.
+    // The package is almost entirely someone else's binary, so the SPDX expression is upstream's,
+    // not this repository's — MIT alone would understate the terms a consumer accepts. Dawn's linked
+    // library is BSD-3-Clause with Apache-2.0 components.
     license: impl === "dawn" ? "BSD-3-Clause AND Apache-2.0 AND MIT" : "MIT OR Apache-2.0",
     os: [platform],
     cpu: [cpuOf(rid)],
@@ -328,9 +311,8 @@ function stage(
   const srcDir = path.join(VENDOR_DIR, rid);
   const name = platformPackageName(rid, impl);
 
-  // Every file the package needs, resolved before anything is written. A staging run that copies
-  // half a package and then fails leaves `dist/npm` looking publishable, which is the one outcome
-  // worth engineering against here.
+  // Every file the package needs, resolved before anything is written: a run that copies half a
+  // package and then fails leaves `dist/npm` looking publishable.
   const libName = p.libFile(platformOf(rid));
   const required = [libName, ...p.extraLibs(rid)];
   for (const file of required) {
@@ -393,17 +375,19 @@ function howToGet(rid: Rid, impl: WgpuImpl, file: string): string {
 /**
  * Does this linked Dawn library actually carry the fused ABI shim?
  *
- * Asked by opening it and looking for one trampoline, because the alternative — trusting that
- * `dawn:link` ran — is exactly the assumption that produces a package which installs, loads, and
- * then cannot make a single by-value call. The symbol is never *called* here; `dlopen` throws when a
- * declared name is absent, which is the whole test.
+ * Answered by opening it and looking for one trampoline; trusting that `dawn:link` ran is the
+ * assumption that produces a package which installs, loads, and then cannot make a single by-value
+ * call. The symbol is never *called* — `dlopen` throws when a declared name is absent, and that is
+ * the whole test.
  *
- * ⚠ Only meaningful for the host's own RID. A cross-staged library is a different architecture and
- * cannot be opened at all, so that case is reported as unknown rather than as a failure — checking
- * it belongs to the leg that built it, where `dawn:link` already verifies all 15 by symbol table.
+ * ⚠ Only answerable for the host's own RID: a cross-staged library is a different architecture and
+ * will not load at all. That case reports "carries it", because checking belongs to the leg that
+ * built it, where `dawn:link` verifies all 15 against the symbol table. Hence the RID parameter — an
+ * earlier revision compared `currentRid()` with `process.platform`, two spellings of the same host,
+ * so the guard could never fire and a cross-staged library was `dlopen`ed anyway.
  */
-function dawnLibraryCarriesShim(libPath: string): boolean {
-  if (platformOf(currentRid()) !== process.platform) return true;
+function dawnLibraryCarriesShim(rid: Rid, libPath: string): boolean {
+  if (platformOf(rid) !== process.platform) return true;
   try {
     dlopen(libPath, { wgpu_bun_shim_abi_version: { args: [], returns: FFIType.u32 } });
     return true;
@@ -442,10 +426,9 @@ function main(argv: string[]): void {
     // Writing the block is a release action, not a repo default. Until the platform packages exist
     // on npm, declaring them would mean every `bun install` tries to resolve four 404s.
     if (impl === "dawn") {
-      // Deliberate, and the whole reason Dawn has a package name of its own. An `optionalDependency`
-      // installs by default, and Dawn is a 10-20 MiB library most consumers will never select — plus
-      // on Windows it needs a runtime dependency this repository does not ship. Opt-in means the
-      // consumer types the name.
+      // The whole reason Dawn has a package name of its own. An `optionalDependency` installs by
+      // default, and Dawn is a 10-20 MiB library most consumers will never select — and on Windows
+      // it needs a runtime dependency this repository does not ship.
       console.error(
         "--wire is for wgpu-native only. Dawn platform packages are opt-in and must not appear " +
           "in optionalDependencies: they would install for everyone, by default, unused.",
@@ -469,9 +452,8 @@ function main(argv: string[]): void {
   }
   if (!/^0\.|^\d+\.\d+\.\d+/.test(version)) problems.push(`package.json version "${version}" is not a semver release`);
   if (rootPkg.private) {
-    // The deliberate interlock: `npm publish` refuses a private package, so a pre-alpha binding
-    // cannot reach the registry by accident. Clearing it is a release decision and belongs in the
-    // release commit, next to the version bump — not left switched off for convenience.
+    // The interlock: `npm publish` refuses a private package, so a pre-alpha binding cannot reach
+    // the registry by accident. Clearing it belongs in the release commit, next to the version bump.
     problems.push(
       'package.json still has `"private": true`.\n' +
         "  That is intentional while the binding is unfinished — it makes an accidental publish\n" +
@@ -502,7 +484,7 @@ function main(argv: string[]): void {
       if (impl === "dawn") {
         // The fused shim is what makes a Dawn package usable at all, and it is invisible in a
         // directory listing — the package is one file either way. Checked by symbol, not by presence.
-        if (fs.existsSync(libPath) && !dawnLibraryCarriesShim(libPath)) {
+        if (fs.existsSync(libPath) && !dawnLibraryCarriesShim(rid, libPath)) {
           problems.push(
             `${rid}: the linked Dawn library does not export the ABI shim.\n` +
               "    Such a package loads and then cannot make a single by-value call. Re-run\n" +
@@ -513,10 +495,9 @@ function main(argv: string[]): void {
       }
       const shimPath = path.join(VENDOR_DIR, rid, "lib", shimFileNameFor(rid));
       if (!fs.existsSync(shimPath)) {
-        // A release without the shim is not a partial release. On a SysV host the package simply
-        // does not run; everywhere else it silently takes the fallback path, so what ships is not
-        // what CI exercised. Both are blockers, and saying which one applies is the difference
-        // between an actionable message and a chore.
+        // A release without the shim is not a partial release. On a SysV host the package does not
+        // run; everywhere else it silently takes the fallback path, so what ships is not what CI
+        // exercised. Both are blockers, so the message says which one applies.
         const [platform, arch] = rid.split("-");
         problems.push(
           `${rid}: no ABI shim (bun run shim:build --rid ${rid}).\n` +

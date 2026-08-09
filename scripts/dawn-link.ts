@@ -8,31 +8,28 @@
  *
  * Output: `vendor/<rid>/lib/<webgpu_dawn.dll | libwebgpu_dawn.so | libwebgpu_dawn.dylib>`.
  *
- * ── Why this step exists at all ─────────────────────────────────────────────────────────────────
- *
  * Every Dawn release asset is a static archive. `bun:ffi` needs something it can `dlopen`, so the
  * archive is an input, not a deliverable — see `dawn.manifest.ts` for the two-pin supply chain that
- * follows from that.
+ * follows.
  *
  * ── The three platforms differ, and only one of them is interesting ─────────────────────────────
  *
  * **Linux and macOS are nearly free.** Dawn's static objects are compiled with default ELF/Mach-O
- * visibility, so the `wgpu*` symbols are already exportable; the linker only has to be told to keep
- * the whole archive and then to hide everything else. That second half is not cosmetic: without a
- * version script, `--whole-archive` also exports the ~600 000 tint/absl/spirv symbols the archive
- * carries, and the library becomes a namespace hazard for anything else in the process.
+ * visibility, so the `wgpu*` symbols are already exportable; the linker only has to keep the whole
+ * archive and then hide everything else. That second half is not cosmetic: without a version script,
+ * `--whole-archive` also exports the ~600 000 tint/absl/spirv symbols in the archive, making the
+ * library a namespace hazard for anything else in the process.
  *
  * **Windows needs an explicit export list.** Dawn's `WGPU_EXPORT` expands to nothing unless
  * `WGPU_SHARED_LIBRARY` is defined, and the release is built static, so the objects carry no
- * `dllexport` at all. The list is generated from the pinned header rather than maintained by hand —
- * a function added upstream then appears automatically, and one removed fails the link loudly.
+ * `dllexport`. The list is generated from the pinned header rather than maintained by hand — a
+ * function added upstream appears automatically, and one removed fails the link loudly.
  *
  * ⚠ **The Windows link needs an MSVC toolset no older than Dawn's own.** Measured against
  * `v20260807.193620`: MSVC 14.50.35717 fails on `__std_min_element_4u`, `__std_max_element_4u` and
  * `__std_min_element_8u` — vectorised STL helpers whose unsigned variants that toolset does not
  * ship. Dawn's releases are built on `windows-latest`, so a CI job on the same image matches by
- * construction. The failure mode is loud, which is the important part: unresolved externals, named,
- * never a silently wrong binary.
+ * construction. The failure is loud: unresolved externals, named, never a silently wrong binary.
  */
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
@@ -75,9 +72,8 @@ function ok(message: string): void {
  * archive" instead of a silently empty directory — the same rule `fetch-wgpu-native.ts` follows.
  *
  * ⚠ **Ambiguity is an error, not a coin toss.** An earlier version returned the first match, and the
- * header probe using that rule picked a different `webgpu.h` on APFS than on NTFS — see
- * `dawnHeaders.ts` for what that cost. A probe is only sound while exactly one file can answer; the
- * moment two can, the tree is not the shape this script assumes and it has to say so.
+ * header probe using that rule picked a different `webgpu.h` on APFS than on NTFS (see
+ * `dawnHeaders.ts`). A probe is only sound while exactly one file can answer.
  */
 function findOneByBasename(root: string, names: readonly string[]): string | null {
   for (const name of names) {
@@ -97,13 +93,13 @@ function findOneByBasename(root: string, names: readonly string[]): string | nul
 /**
  * Container image to run the compiler in, when the ABI floor of the host is not the one to ship.
  *
- * Dawn's own Linux release is built inside `dockcross/manylinux_2_28-x64` — its CI comments say the
- * reason is glibc 2.28 compatibility. Re-linking those objects on a bare `ubuntu-latest` produces a
- * library that requires *that runner's* glibc and silently throws the floor away: it works in CI,
- * works on the maintainer's machine, and fails on the older distribution the floor existed for.
+ * Dawn's own Linux release is built inside `dockcross/manylinux_2_28-x64`; its CI comments give the
+ * reason as glibc 2.28 compatibility. Re-linking those objects on a bare `ubuntu-latest` produces a
+ * library requiring *that runner's* glibc and silently throws the floor away: works in CI, works on
+ * the maintainer's machine, fails on the older distribution the floor existed for.
  *
- * So the image is a parameter, not a comment. Set it and the compiler runs inside; leave it unset
- * and it runs on the host, which is what a local experiment wants.
+ * So the image is a parameter. Set it and the compiler runs inside; leave it unset and it runs on
+ * the host, which is what a local experiment wants.
  */
 const CONTAINER = process.env["DAWN_LINK_CONTAINER"] ?? "";
 
@@ -138,11 +134,10 @@ interface ILinkInputs {
   /**
    * The ABI shim's static archive, fused into the same library.
    *
-   * A Dawn install is then one file that carries the C API *and* the trampolines `bun:ffi` needs for
-   * the by-value aggregates it cannot express. The shim's own `open(path)` is unchanged by this: it
-   * is handed the path of the library it should resolve against, and on this build that is the
-   * library it already lives in — `LoadLibraryW`/`dlopen` of an already-loaded module returns the
-   * same handle, so the trampolines find Dawn's `wgpu*` next to themselves.
+   * A Dawn install is then one file carrying the C API *and* the trampolines `bun:ffi` needs for the
+   * by-value aggregates it cannot express. The shim's own `open(path)` is unaffected: the path it is
+   * handed is the library it already lives in, and `LoadLibraryW`/`dlopen` of an already-loaded
+   * module returns the same handle, so the trampolines find Dawn's `wgpu*` next to themselves.
    */
   readonly shimLib: string;
   readonly header: string;
@@ -150,10 +145,10 @@ interface ILinkInputs {
    * Everything the library must export: Dawn's C API, parsed from {@link header} once in `main`,
    * followed by the shim's flat surface.
    *
-   * Parsed once, and in one place, because the guard that the names are plausible has to cover every
-   * platform. It used to live inside the Windows path only, so when the header probe returned a
-   * decoy the Windows leg failed with "the header shape changed" and the macOS leg wrote an empty
-   * export list and linked a library that exported nothing.
+   * Parsed once, in one place, because the guard that the names are plausible has to cover every
+   * platform. It used to live in the Windows path only, so when the header probe returned a decoy
+   * the Windows leg failed with "the header shape changed" while the macOS leg wrote an empty export
+   * list and linked a library that exported nothing.
    */
   readonly exports: readonly string[];
   readonly outDir: string;
@@ -165,13 +160,11 @@ interface ILinkInputs {
  *
  * ⚠ **`link` must never be invoked bare on Windows.** Git for Windows ships coreutils' `link.exe` in
  * `usr/bin`, and on a GitHub runner that is what a bare `link` resolves to — it accepts the first
- * argument and then reports `extra operand '/MACHINE:X64'`, which reads like a linker complaint and
- * is not one. Measured on `windows-latest`. MSVC's linker is also not on `PATH` at all until the
- * developer environment is initialised, and it needs `LIB` set for `user32.lib` and friends.
- *
- * So the whole invocation goes through `vcvars64.bat`, which fixes both at once, and this repository
- * keeps that decision here rather than in the workflow — the same rule the container wrapping
- * follows.
+ * argument and reports `extra operand '/MACHINE:X64'`, which reads like a linker complaint and is
+ * not one. Measured on `windows-latest`. MSVC's linker is also not on `PATH` until the developer
+ * environment is initialised, and it needs `LIB` set for `user32.lib` and friends. So the whole
+ * invocation goes through `vcvars64.bat`, which fixes both, and that decision lives here rather than
+ * in the workflow — the same rule the container wrapping follows.
  */
 function vcvarsPath(): string {
   const vswhere = String.raw`C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`;
@@ -191,10 +184,10 @@ function vcvarsPath(): string {
 /**
  * Run a command with the MSVC environment and capture its output.
  *
- * `dumpbin` needs this for the same reason `link` does: it is an MSVC tool and is not on `PATH`
- * until `vcvars64.bat` has run. Unlike {@link runInMsvcEnv} the output is wanted, so it goes to a
- * file the batch redirects into — `cmd /c` gives no clean way to separate the batch's own noise from
- * the tool's on a pipe.
+ * `dumpbin` needs this for the same reason `link` does: an MSVC tool is not on `PATH` until
+ * `vcvars64.bat` has run. Unlike {@link runInMsvcEnv} the output is wanted, so it goes to a file the
+ * batch redirects into — `cmd /c` gives no clean way to separate the batch's own noise from the
+ * tool's on a pipe.
  */
 function captureInMsvcEnv(cmd: string, args: string[], cwd: string): { stdout: string; stderr: string; status: number | null; error?: Error } {
   const script = path.join(cwd, "_probe.bat");
@@ -220,9 +213,9 @@ function runInMsvcEnv(cmd: string, args: string[], cwd: string): void {
   const quoted = args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
   fs.writeFileSync(script, `@echo off\r\ncall "${vcvarsPath()}" >nul\r\n${cmd} ${quoted}\r\nexit /b %ERRORLEVEL%\r\n`);
   const r = spawnSync("cmd", ["/c", script], { cwd, stdio: "inherit", shell: false });
-  // Removed before the status is judged, not in a `finally`: `fail` exits the process, and
-  // `process.exit` does not unwind — a `finally` here would leave the batch behind on exactly the
-  // runs that fail, in the output directory, where it then looks like part of the product.
+  // Removed before the status is judged, not in a `finally`: `fail` calls `process.exit`, which does
+  // not unwind, so a `finally` would leave the batch behind in the output directory on exactly the
+  // runs that fail — where it looks like part of the product.
   fs.rmSync(script, { force: true });
   if (r.error) fail(`cmd: ${r.error.message}`);
   if (r.status !== 0) fail(`${cmd} exited ${r.status}`);
@@ -234,9 +227,8 @@ function linkWindows(io: ILinkInputs): void {
   info(`${io.rid}: ${io.exports.length} exports → ${path.basename(defPath)}`);
 
   // System libraries per Dawn's own installed `DawnTargets.cmake`. Notably absent: d3d12/dxgi/dxc —
-  // Dawn loads those at runtime, which is also why DXC (`dxcompiler.dll` + `dxil.dll`) has to travel
-  // beside the library rather than being linked against — see DAWN_WINDOWS_RUNTIME_FILES, where the
-  // requirement is recorded as Dawn itself reported it.
+  // Dawn loads those at runtime, which is why DXC (`dxcompiler.dll` + `dxil.dll`) must travel beside
+  // the library rather than be linked against. See DAWN_WINDOWS_RUNTIME_FILES.
   runInMsvcEnv(
     "link",
     [
@@ -246,8 +238,8 @@ function linkWindows(io: ILinkInputs): void {
       "/OPT:REF", "/OPT:ICF",
       io.staticLib,
       // The shim, fused. No `/WHOLEARCHIVE`: every name in the `.def` is a symbol the linker must
-      // resolve, so listing the trampolines there is already what pulls their object out of this
-      // archive — and only that object, instead of all of Rust's std.
+      // resolve, so listing the trampolines there already pulls their object out of this archive —
+      // and only that object, instead of all of Rust's std.
       io.shimLib,
       "user32.lib", "onecore_apiset.lib", "dxguid.lib",
       "ole32.lib", "oleaut32.lib", "advapi32.lib", "kernel32.lib",
@@ -272,9 +264,9 @@ function linkLinux(io: ILinkInputs): void {
       "-Wl,--whole-archive", io.staticLib, "-Wl,--no-whole-archive",
       // The shim, fused. `-u` and not `--whole-archive`: nothing in Dawn references the trampolines,
       // so without a forced reference their object is never pulled out of the archive and the
-      // version script then exports a pattern that matches nothing — silently, because an ELF
-      // version script does not fail on an unmatched glob. Whole-archiving instead would drag in all
-      // of Rust's std for fifteen functions.
+      // version script exports a pattern matching nothing — silently, because an ELF version script
+      // does not fail on an unmatched glob. Whole-archiving would drag in all of Rust's std for
+      // fifteen functions.
       ...SHIM_EXPORTS.map((n) => `-Wl,-u,${n}`),
       io.shimLib,
       `-Wl,--version-script=${versionScript}`,
@@ -313,10 +305,9 @@ function linkDarwin(io: ILinkInputs): void {
     ],
     io.outDir,
     // ⚠ No `MACOSX_DEPLOYMENT_TARGET` override. An earlier revision forced `12.0`, taken from a
-    // summary of Dawn's CI rather than from the archive itself — and the objects in this release
-    // declare **26.0**. The link then emitted "built for newer 'macOS' version (26.0) than being
-    // linked (12.0)" for every object and stamped a minimum the code does not support. The objects
-    // carry their own floor; a number invented above them is worse than no number.
+    // summary of Dawn's CI rather than from the archive — whose objects declare **26.0**. The link
+    // emitted "built for newer 'macOS' version (26.0) than being linked (12.0)" for every object and
+    // stamped a minimum the code does not support. The objects carry their own floor.
   );
 }
 
@@ -338,22 +329,21 @@ function verifyExports(io: ILinkInputs): {
   /**
    * Candidate symbol readers, tried in order.
    *
-   * A list rather than one command per platform, because the first version of this guessed and was
-   * wrong twice on one run: `nm -gD` is GNU syntax that BSD `nm` rejects, and `dumpbin` is not on
-   * `PATH` until the MSVC environment is initialised — the same trap `link` fell into. Worse, the
-   * first version discarded stderr, so the failure said only "could not read the symbol table" and
-   * named nothing. Every attempt now records what it was and what it said.
+   * A list rather than one command per platform: the first version guessed and was wrong twice on
+   * one run — `nm -gD` is GNU syntax that BSD `nm` rejects, and `dumpbin` is not on `PATH` until the
+   * MSVC environment is initialised (the same trap `link` fell into). It also discarded stderr, so
+   * the failure said only "could not read the symbol table". Every attempt now records what it was
+   * and what it said.
    */
   const attempts: { cmd: string; args: string[]; msvcEnv?: boolean }[] =
     platform === "win32"
       ? [{ cmd: "dumpbin", args: ["/EXPORTS", "/NOLOGO", io.outLib], msvcEnv: true }]
       : platform === "darwin"
         ? [
-            // `/usr/bin/nm` on macOS is an `xcrun` shim: if the active developer directory is not
-            // set it fails with a message on *stderr* and an empty stdout. The measured darwin leg
-            // did exactly that, and because the first version of this function read only stdout, the
-            // whole diagnosis was "could not read the symbol table". Hence both spellings, and hence
-            // stderr is now part of the report.
+            // `/usr/bin/nm` on macOS is an `xcrun` shim: with no active developer directory it
+            // fails with a message on *stderr* and an empty stdout. The measured darwin leg did
+            // exactly that, and reading only stdout reduced the diagnosis to "could not read the
+            // symbol table". Hence both spellings, and hence stderr is part of the report.
             { cmd: "nm", args: ["-gU", io.outLib] },
             { cmd: "xcrun", args: ["nm", "-gU", io.outLib] },
             { cmd: "llvm-nm", args: ["--defined-only", "-g", io.outLib] },
@@ -373,10 +363,9 @@ function verifyExports(io: ILinkInputs): {
       ? captureInMsvcEnv(a.cmd, a.args, io.outDir)
       : spawnSync(a.cmd, a.args, { encoding: "utf-8" });
     // Success is "the reader ran", NOT "the reader printed something". An empty listing from a
-    // reader that exited 0 is a real answer — the library exports nothing — and it belongs to the
-    // symbol-count check below, which names the number. Conflating the two is how the previous
-    // version turned "your `.def`/`-exported_symbols_list` matched nothing" into the far less useful
-    // "could not read the symbol table".
+    // reader that exited 0 is a real answer — the library exports nothing — and belongs to the
+    // symbol-count check below, which names the number. Conflating the two turned "your
+    // `.def`/`-exported_symbols_list` matched nothing" into "could not read the symbol table".
     if (!r.error && r.status === 0) {
       text = `${r.stdout ?? ""}`;
       reader = `${a.cmd} ${a.args.slice(0, -1).join(" ")}`;
@@ -389,9 +378,7 @@ function verifyExports(io: ILinkInputs): {
   }
 
   if (text === null) {
-    // Fatal, not a warning. A link can succeed and export nothing — an empty version script, a
-    // `.def` parsed but ignored, a `force_load` that matched no archive — and none of that is
-    // visible until the first `dlsym` on someone else's machine.
+    // Fatal, not a warning: an unverified library must not be published.
     fail(
       `${io.rid}: could not read the symbol table of ${path.basename(io.outLib)}.\n` +
         `       Tried:\n         ${tried.join("\n         ")}\n` +
@@ -399,10 +386,9 @@ function verifyExports(io: ILinkInputs): {
     );
   }
   // The sample is carried out so a zero can be *shown* rather than asserted. "0 symbols" has two
-  // very different causes — the library exports nothing, or the reader's output is not shaped the
-  // way the parser expects — and they are indistinguishable from a count alone. The Mach-O
-  // underscore regression was the second kind, and three lines of the listing would have ended it
-  // on the spot.
+  // causes — the library exports nothing, or the reader's output is not shaped the way the parser
+  // expects — indistinguishable from a count alone. The Mach-O underscore regression was the second
+  // kind, and three lines of the listing would have ended it on the spot.
   const lines = text.split("\n").filter((l) => l.trim());
   return { names: wgpuSymbolsIn(text), reader, sample: lines.slice(0, 3), lineCount: lines.length };
 }
@@ -451,8 +437,8 @@ function main(argv: string[]): void {
   displace(outLib);
 
   // One cargo build, shared with `shim:build`. On Linux it runs inside the same container as the C++
-  // link — a shim compiled against the runner's glibc and fused into a library linked in
-  // manylinux_2_28 raises the floor of the result and nothing says so.
+  // link: a shim compiled against the runner's glibc and fused into a library linked in
+  // manylinux_2_28 raises the floor of the result, silently.
   let shim;
   try {
     shim = buildShimCrate(rid, { container: CONTAINER, onCommand: (c) => info(`${rid}: ${c}`) });
@@ -509,14 +495,12 @@ function main(argv: string[]): void {
   }
   ok(`${rid}: ${api277.length} Dawn + ${SHIM_EXPORTS.length} shim symbols exported (${exported.reader})`);
 
-  // The header travels with the library, in a directory of its own.
-  //
-  // Not decoration: `test/callback-abi.test.ts` derives the population of by-value `WGPUStringView`
-  // callbacks from the header sitting beside the loaded library, and that is the check which makes
-  // "there is no third hazardous call site" a derived fact rather than a maintained list. Without a
-  // Dawn header those three checks skip, and a skipped ABI check on a *second* implementation is
-  // precisely where an unnoticed difference would live. It goes to `include-dawn` rather than
-  // `include` because wgpu-native's headers are already there and the two must never be swapped.
+  // The header travels with the library, in a directory of its own. `test/callback-abi.test.ts`
+  // derives the population of by-value `WGPUStringView` callbacks from the header sitting beside the
+  // loaded library, which is what makes "there is no third hazardous call site" a derived fact
+  // rather than a maintained list. Without a Dawn header those three checks skip, and a skipped ABI
+  // check on a *second* implementation is exactly where an unnoticed difference would live. It goes
+  // to `include-dawn`, not `include`, because wgpu-native's headers are already there.
   const includeDir = path.join(VENDOR_DIR, rid, "include-dawn");
   fs.mkdirSync(includeDir, { recursive: true });
   fs.copyFileSync(header, path.join(includeDir, "webgpu.h"));

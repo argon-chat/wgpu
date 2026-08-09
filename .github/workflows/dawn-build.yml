@@ -25,7 +25,6 @@
 #   linux-x64     the compiler runs inside `dockcross/manylinux_2_28-x64`, which is the image Dawn's
 #                 own CI builds in. Linking those objects on a bare runner produces a library that
 #                 needs *that runner's* glibc and silently forfeits the 2.28 floor.
-#                 Measured: 277 exported `wgpu*` symbols, 19.4 MiB, 65 s.
 #   darwin-arm64  native, with **no** deployment-target override — the archive's objects declare
 #                 their own minimum (26.0 in this release) and a number invented above them only
 #                 produces "built for newer macOS version" on every object. See `dawn-link.ts`.
@@ -89,8 +88,7 @@ jobs:
   link:
     name: ${{ matrix.rid }}
     runs-on: ${{ matrix.runner }}
-    # The archive is 111 MiB compressed and ~585 MiB expanded on Windows; the link itself takes
-    # seconds. This bounds a stall, not the work.
+    # Bounds a stall, not the work: the download dominates and the link itself is quick.
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -104,7 +102,8 @@ jobs:
             runner: macos-15
             container: ""
           - rid: win32-x64
-            # NOT `windows-latest`: this leg's correctness depends on the MSVC toolset being no older
+            # `windows-latest` deliberately, rather than a pinned image: this leg's correctness
+            # depends on the MSVC toolset being no older
             # than Dawn's, and Dawn builds on the `windows-latest` image. Tracking the same label is
             # deliberate — if the images diverge, the link fails loudly with named symbols.
             runner: windows-latest

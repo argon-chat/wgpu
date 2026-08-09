@@ -14,10 +14,9 @@
  *
  * ── ⚠ Submitting an INVALID command buffer aborts the process ───────────────────────────────────
  *
- * Measured on this build, and worth stating plainly because it is the one place where the
- * uncaptured-error callback does **not** save you: `wgpuQueueSubmit` handles its own errors as
- * fatal. A command buffer whose encoding was invalid — say a `copyBufferToBuffer` whose source
- * lacks `COPY_SRC` — produces this, not a validation error:
+ * Measured on this build. It is the one place the uncaptured-error callback does **not** save you:
+ * `wgpuQueueSubmit` handles its own errors as fatal. A command buffer whose encoding was invalid —
+ * say a `copyBufferToBuffer` whose source lacks `COPY_SRC` — produces this, not a validation error:
  *
  * ```
  * thread '<unnamed>' panicked at src\lib.rs:605:5:
@@ -27,15 +26,11 @@
  * followed by `panic in a function that cannot unwind` and an abort. The error scope is open, the
  * uncaptured-error callback is installed, and neither is consulted.
  *
- * What *does* behave normally, verified the same way: device-level creation (`createBuffer`,
- * `createBindGroup`, `createRenderPipeline`, …) and `commandEncoder.finish()` itself all report
- * through the error scope and survive. So the working shape for a negative test is
- * **encode and `finish()`, then `popErrorScope()` — but do not submit**. Submitting is only safe
- * once the encoding is known good.
- *
- * This package does not paper over it: knowing whether a buffer is valid requires an asynchronous
- * verdict, and `submit()` is synchronous by specification. Swallowing submissions on suspicion
- * would break every legitimate frame.
+ * Verified the same way: device-level creation (`createBuffer`, `createBindGroup`,
+ * `createRenderPipeline`, …) and `commandEncoder.finish()` do report through the error scope and
+ * survive. So a negative test must **encode and `finish()`, then `popErrorScope()` — but not
+ * submit**. This package does not paper over it: knowing whether a buffer is valid requires an
+ * asynchronous verdict, and `submit()` is synchronous by specification.
  */
 
 import { ptr as bunPtr } from "bun:ffi";
@@ -88,15 +83,14 @@ export class GPUQueue {
   /**
    * Flush staged `writeBuffer` / `writeTexture` uploads.
    *
-   * ⚠ Measured, and a silent-wrong-data trap if you do not know it: `wgpuQueueWriteBuffer` stages
-   * its copy into a pending internal encoder that is flushed **only by a submit**. Neither
-   * `wgpuDevicePoll(wait = true)` nor `wgpuQueueOnSubmittedWorkDone` flushes it. So a
-   * `writeBuffer` followed straight by `mapAsync` reads whatever was in the buffer before —
-   * zeroes, typically — with no error anywhere.
+   * ⚠ Measured silent-wrong-data trap: `wgpuQueueWriteBuffer` stages its copy into a pending
+   * internal encoder flushed **only by a submit**. Neither `wgpuDevicePoll(wait = true)` nor
+   * `wgpuQueueOnSubmittedWorkDone` flushes it, so a `writeBuffer` followed straight by `mapAsync`
+   * reads whatever was in the buffer before — typically zeroes — with no error anywhere.
    *
-   * WebGPU specifies queue operations as ordered, so that divergence is the binding's to close, not
-   * the caller's to remember. A zero-command submit is the cheapest thing that flushes, and it
-   * cannot trip the "invalid command buffer aborts" path above because there is no command buffer.
+   * WebGPU specifies queue operations as ordered, so closing that divergence is the binding's job,
+   * not the caller's. A zero-command submit is the cheapest flush, and it cannot trip the "invalid
+   * command buffer aborts" path above because there is no command buffer.
    */
   flushWrites(): void {
     wgpu().wgpuQueueSubmit(this.handle, 0n, null);

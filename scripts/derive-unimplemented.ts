@@ -5,33 +5,30 @@
  *
  * ── Why this exists ─────────────────────────────────────────────────────────────────────────────
  *
- * These stubs are indistinguishable from working functions until you call one: they are present in
- * the export table, present in `webgpu.h`, and typed exactly like their neighbours. Because the
- * entry points are `extern "C"` (and therefore `nounwind`), the Rust panic cannot unwind and is
- * escalated to `abort`. There is no return code, no catchable error, and no JS stack — the whole
- * process dies, taking every other suite in it.
+ * These stubs are indistinguishable from working functions until you call one: present in the export
+ * table, present in `webgpu.h`, typed like their neighbours. The entry points are `extern "C"` and
+ * therefore `nounwind`, so the Rust panic cannot unwind and is escalated to `abort` — no return
+ * code, no catchable error, no JS stack, and every other suite in the process dies too.
  *
- * The trap this sets is specific and severe: `wgpuBufferReadMappedRange` / `wgpuBufferWriteMappedRange`
- * are the *modern* `webgpu.h` spellings for buffer access, so a binding generated faithfully from
- * the header picks exactly the two that abort, and dies on its first pixel readback. The functions
- * that work are the older `wgpuBufferGetMappedRange` / `wgpuBufferGetConstMappedRange`.
+ * The trap is specific: `wgpuBufferReadMappedRange` / `wgpuBufferWriteMappedRange` are the *modern*
+ * `webgpu.h` spellings for buffer access, so a binding generated faithfully from the header picks
+ * exactly the two that abort and dies on its first pixel readback. The ones that work are the older
+ * `wgpuBufferGetMappedRange` / `wgpuBufferGetConstMappedRange`.
  *
  * ── The derivation ──────────────────────────────────────────────────────────────────────────────
  *
- * "The ones we noticed" is not a mechanism, and the export table cannot be consulted because the
- * export table is precisely what lies. So: **probe every exported symbol, one isolated subprocess
- * each**, with zeroed arguments, and classify by what the child printed on stderr.
- *
- * The classification is sound because `unimplemented!()` is the *first* statement in these bodies —
- * it fires before any argument is touched — and it prints the literal Rust panic banner
- * `not implemented`. A NULL handle passed to a *working* function produces an access violation or a
- * validation complaint, neither of which contains that string. So:
+ * "The ones we noticed" is not a mechanism, and the export table is precisely what lies. So: **probe
+ * every exported symbol, one isolated subprocess each**, with zeroed arguments, and classify by what
+ * the child printed on stderr. Sound because `unimplemented!()` is the *first* statement in these
+ * bodies — it fires before any argument is touched — and prints the literal Rust panic banner
+ * `not implemented`, while a NULL handle passed to a *working* function produces an access violation
+ * or a validation complaint, neither containing that string. So:
  *
  *   - child stderr contains "not implemented"  → the symbol is a stub. Certain.
  *   - anything else (clean exit, access violation, timeout, validation error) → not a stub.
  *
- * The signature of each symbol is read from the pinned headers that shipped in the same archive as
- * the DLL, so this script has no hand-written knowledge of the API at all.
+ * Signatures are read from the pinned headers that shipped in the same archive as the DLL, so this
+ * script has no hand-written knowledge of the API.
  *
  * ── Usage ───────────────────────────────────────────────────────────────────────────────────────
  *
@@ -39,8 +36,8 @@
  *   bun run scripts/derive-unimplemented.ts --json     # sweep, print machine-readable output
  *   bun run scripts/derive-unimplemented.ts --probe X  # internal: call one symbol and exit
  *
- * Run it once per wgpu-native pin bump. It is deliberately not part of the normal test run: 200+
- * process spawns is a minute of wall clock, and the answer only changes when the pin does.
+ * Run once per wgpu-native pin bump. Deliberately not part of the normal test run: 200+ process
+ * spawns is a minute of wall clock, and the answer only changes when the pin does.
  */
 
 import * as fs from "node:fs";
@@ -127,7 +124,7 @@ async function probe(name: string): Promise<never> {
     [name]: { args: sig.args.map((a) => map[a]), returns: FFIType.u64 },
   });
   // Zeroed arguments. A by-value aggregate reaches the callee by hidden reference on Win64, so a
-  // pointer to zeroed memory is the correct shape there; on any ABI it is enough to reach the
+  // pointer to zeroed memory is the correct shape there; on any ABI it reaches the
   // `unimplemented!()` at the top of the body, which is all this probe needs.
   const scratch = new Uint8Array(256);
   const args = sig.args.map((a) => (a === "ptr" ? ptr(scratch) : a === "u64" ? 0n : 0));

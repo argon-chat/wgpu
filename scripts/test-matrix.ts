@@ -4,7 +4,6 @@
  *
  *     bun run test:matrix
  *     bun run test:matrix --impl dawn          # one implementation
- *     bun run test:matrix -- --timeout 60000   # anything after `--` goes to `bun test`
  *
  * ── Why this exists ─────────────────────────────────────────────────────────────────────────────
  *

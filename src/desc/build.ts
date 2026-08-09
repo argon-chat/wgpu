@@ -1,53 +1,48 @@
 /**
  * Descriptor construction: header defaults, and lifetime for everything a descriptor points at.
  *
- * `src/layouts/` deliberately knows nothing about semantics — `allocStruct` hands back a zeroed
- * buffer, and zeroing is a *memory* operation, not "reset to defaults". This module is the layer
- * that supplies the meaning, and it has two jobs.
+ * `src/layouts/` knows nothing about semantics — `allocStruct` hands back a zeroed buffer, and
+ * zeroing is a *memory* operation, not "reset to defaults". This module supplies the meaning, and
+ * has two jobs.
  *
  * ══ 1. "Absent" is not "zero" ══
  *
  * wgpu-native resolves an omitted field against the resource it belongs to — all remaining mip
- * levels, all remaining array layers, the rest of the buffer. Those sentinels are mostly
- * `UINT32_MAX` / `UINT64_MAX`, so a zeroed struct is not a neutral starting point: it is an
- * explicit request for *zero* mip levels and a *zero-sized* binding.
- *
- * The failure modes are not symmetric, and the dangerous one is quiet:
+ * levels, all remaining array layers, the rest of the buffer — and those sentinels are mostly
+ * `UINT32_MAX` / `UINT64_MAX`. So a zeroed struct is not neutral: it explicitly requests *zero* mip
+ * levels and a *zero-sized* binding. The dangerous failure mode is the quiet one:
  *
  *   - `arrayLayerCount` wrong on a cube view → **rejected**, with a clear message.
  *   - `format` wrong on a depth-only aspect  → **rejected**, with a clear message.
  *   - `mipLevelCount` defaulted to 1 on a mipped view → **accepted, and wrong.** A prefiltered
  *     roughness chain silently collapses to mip 0. It validates. It renders. It is incorrect.
  *
- * So {@link initStruct} starts every descriptor from the pinned header's own `WGPU_*_INIT` values
- * and only then applies the caller's fields. {@link INIT_DEFAULTS} carries those values, resolved
- * mechanically from the macros in the vendored header; only the non-zero ones are listed, because
- * the buffer is already zero. Nothing else in this package may call `allocStruct` directly.
+ * So {@link initStruct} starts every descriptor from the pinned header's own `WGPU_*_INIT` values,
+ * then applies the caller's fields. {@link INIT_DEFAULTS} carries those values, resolved mechanically
+ * from the macros in the vendored header; only the non-zero ones are listed, because the buffer is
+ * already zero. Nothing else in this package may call `allocStruct` directly.
  *
- * Two deliberate exclusions, both of which would be bugs if included:
+ * Two deliberate exclusions, both bugs if included:
  *
- *   - **`WGPUStringView`.** Its `INIT` sets `length = WGPU_STRLEN` (`SIZE_MAX`), which pairs with a
- *     non-NULL `data` to mean "NUL-terminated, measure it". With the NULL `data` a fresh buffer has,
- *     it would ask wgpu-native to `strlen(NULL)`. `{NULL, 0}` — the zeroed state — is the
- *     representation of an absent label that actually works.
- *   - **Nested aggregates reached through `sub()`.** The header's own macros initialise most of
- *     those with `_wgpu_STRUCT_ZERO_INIT`, i.e. genuinely to zero. The load-bearing case is
+ *   - **`WGPUStringView`.** Its `INIT` sets `length = WGPU_STRLEN` (`SIZE_MAX`), which with a
+ *     non-NULL `data` means "NUL-terminated, measure it". With the NULL `data` of a fresh buffer it
+ *     would ask wgpu-native to `strlen(NULL)`. The zeroed `{NULL, 0}` is the absent-label
+ *     representation that works.
+ *   - **Nested aggregates reached through `sub()`.** The header's macros initialise most of those
+ *     with `_wgpu_STRUCT_ZERO_INIT`, i.e. genuinely to zero. The load-bearing case is
  *     `WGPUBindGroupLayoutEntry`, whose four sub-layouts must all read `BindingNotUsed` (0) unless
- *     the entry really is of that kind — applying `WGPUBufferBindingLayout`'s own default there
- *     would set `type = Undefined`, giving an entry with two non-`BindingNotUsed` sub-layouts,
- *     which is the shape that **panics** wgpu-native's `conv.rs` rather than erroring.
+ *     the entry really is of that kind. Applying `WGPUBufferBindingLayout`'s own default there would
+ *     set `type = Undefined`, giving an entry with two non-`BindingNotUsed` sub-layouts — the shape
+ *     that **panics** wgpu-native's `conv.rs` rather than erroring.
  *
  * ══ 2. Lifetime ══
  *
  * A descriptor is mostly pointers: labels, entry arrays, nested descriptors. Something must hold
- * those alive from the moment `ptr()` is taken until the native call returns, and Bun never
- * promises that taking a pointer pins a buffer against GC.
- *
- * {@link Arena} is that something, and it is deliberately the dullest possible design: every
- * allocation is a fresh buffer, nothing is pooled, nothing is recycled, nothing is freed. A pool
- * keyed by object identity is exactly the design that lets a stale native write land in an
- * unrelated request's memory — a bug whose *loud* face is a double-free throw and whose quiet face
- * is a wrong answer somewhere else entirely.
+ * those alive from the moment `ptr()` is taken until the native call returns, and Bun never promises
+ * that taking a pointer pins a buffer against GC. {@link Arena} is that something, deliberately
+ * dull: every allocation is a fresh buffer, nothing is pooled, recycled or freed. A pool keyed by
+ * object identity is exactly what lets a stale native write land in an unrelated request's memory —
+ * loudly as a double-free throw, quietly as a wrong answer somewhere else.
  */
 
 import { ptr as bunPtr } from "bun:ffi";
@@ -72,7 +67,7 @@ export const U64_UNDEFINED = 0xffffffffffffffffn;
  * Non-zero field defaults, resolved from the pinned header's `WGPU_*_INIT` macros.
  *
  * Zero-valued defaults are omitted: the allocation already starts zeroed, and listing them would
- * invite someone to "tidy up" the list by deleting the ones that look redundant.
+ * invite a "tidy-up" that deletes whichever ones look redundant.
  */
 const INIT_DEFAULTS: Readonly<Record<string, Readonly<Record<string, number | bigint>>>> = {
   // `type = WGPUBufferBindingType_Undefined`. Only applies when the layout is built standalone;
@@ -134,9 +129,8 @@ function applyInitDefaults(view: CStructView<AggregateName>, name: string): void
 /**
  * Allocate a descriptor initialised to the header's documented defaults.
  *
- * The replacement for `allocStruct` everywhere in this package. Using `allocStruct` directly gives
- * a struct that means "zero of everything", which for most WebGPU descriptors is a different
- * request than the one the caller made.
+ * The replacement for `allocStruct` everywhere in this package: `allocStruct` alone means "zero of
+ * everything", which for most WebGPU descriptors is a different request than the caller made.
  */
 export function initStruct<N extends AggregateName>(name: N): CStructView<N> {
   const view = allocStruct(name);
@@ -156,9 +150,9 @@ const UTF8 = new TextEncoder();
 /**
  * Keeps every buffer a descriptor tree points at alive for the duration of an FFI call.
  *
- * One arena per native call. wgpu-native copies descriptors on entry, so the arena can be dropped
- * as soon as the synchronous call returns — but not one instruction sooner, which is why the arena
- * is a parameter rather than a global.
+ * One arena per native call. wgpu-native copies descriptors on entry, so the arena can be dropped as
+ * soon as the synchronous call returns — but not one instruction sooner, which is why it is a
+ * parameter rather than a global.
  */
 export class Arena {
   readonly #alive: unknown[] = [];
@@ -215,8 +209,8 @@ export class Arena {
    * Write a `WGPUStringView` member from a JS string.
    *
    * `undefined` leaves it `{NULL, 0}`, which is how "no label" is spelled. An empty string is
-   * written the same way: a zero-length view needs no storage, and a non-NULL pointer to nothing
-   * is strictly worse than a NULL.
+   * written the same way: a zero-length view needs no storage, and a non-NULL pointer to nothing is
+   * strictly worse than a NULL.
    */
   writeString(view: CStructView<"WGPUStringView">, value: string | undefined): void {
     if (!value) {

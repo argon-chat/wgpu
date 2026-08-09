@@ -3,17 +3,16 @@
  *
  * ── `bytesPerRow` / `rowsPerImage` are "absent or exact", never "pass it if you have it" ────────
  *
- * `rowsPerImage` is **required** when a copy's depth exceeds 1 and is **poison** for a
- * single-image 2D copy — supplying block-rows there trips wgpu-native's texel-height check. Both
- * stay at `WGPU_COPY_STRIDE_UNDEFINED` unless the caller named them, which is the same rule as
- * every other optional field and for the same reason.
+ * `rowsPerImage` is **required** when a copy's depth exceeds 1 and is **poison** for a single-image
+ * 2D copy — supplying block-rows there trips wgpu-native's texel-height check. Both stay at
+ * `WGPU_COPY_STRIDE_UNDEFINED` unless the caller named them, like every other optional field.
  *
- * Block-compressed copies carry a second, quieter constraint that belongs to the caller rather
- * than to this layer: copy extents are counted in texels but must be **block-aligned**, and the
- * tail of a compressed mip chain (4×4, 2×2, 1×1) still stores a whole block. wgpu-native rejects a
- * 2-texel-wide copy into a 4×4-block format, and the visible symptom is that the texture silently
- * never loads. This module cannot fix that without knowing the format's block size, so it does not
- * pretend to — it passes the caller's extents through unchanged rather than rounding them.
+ * ⚠ Block-compressed copies carry a second, quieter constraint, and it belongs to the caller: copy
+ * extents are counted in texels but must be **block-aligned**, and the tail of a compressed mip
+ * chain (4×4, 2×2, 1×1) still stores a whole block. wgpu-native rejects a 2-texel-wide copy into a
+ * 4×4-block format, and the visible symptom is that the texture silently never loads. This module
+ * cannot fix that without knowing the format's block size, so it passes the caller's extents through
+ * unchanged rather than rounding them.
  *
  * ── `depthClearValue` ───────────────────────────────────────────────────────────────────────────
  *
@@ -119,8 +118,8 @@ export function packRenderPassDescriptor(
  *
  * Absent stays absent, like every other optional field here. What makes that true across both the
  * copy and `writeTexture` paths is {@link writeTexelCopyBufferLayout}, which writes the "unset"
- * sentinel explicitly rather than trusting a fresh buffer to already hold it — read the note there
- * before changing anything about the strides.
+ * sentinel explicitly rather than trusting a fresh buffer to hold it — read the note there before
+ * changing anything about the strides.
  */
 export function packTexelCopyBufferInfo(arena: Arena, info: GPUTexelCopyBufferInfo): Ptr {
   const d = arena.struct("WGPUTexelCopyBufferInfo");
@@ -144,21 +143,17 @@ export function packTexelCopyBufferInfo(arena: Arena, info: GPUTexelCopyBufferIn
  *
  * Zero is not "unset" here; it is an invalid stride. Measured: a `copyTextureToBuffer` whose
  * `rowsPerImage` reads 0 makes wgpu-native panic in `conv.rs:828` — `invalid rowsPerImage`,
- * non-unwinding, exit 127, no catchable error and no JS stack — while Dawn rejects it as a
- * validation error naming the value (`the height of each image in blocks (4) is > rowsPerImage (0)`)
- * and copies nothing. Writing the sentinel makes both paths mean the same thing, and both
- * implementations then accept the copy and return the correct pixels.
+ * non-unwinding, with no catchable error and no JS stack — while Dawn rejects it as a validation
+ * error naming the value (`the height of each image in blocks (4) is > rowsPerImage (0)`) and copies
+ * nothing. Writing the sentinel makes both paths mean the same thing, and both then accept the copy
+ * and return the correct pixels.
  *
- * ── What was here before ────────────────────────────────────────────────────────────────────────
- *
- * `packTexelCopyBufferInfo` used to materialise `rowsPerImage` from `copySize.height`, described as
- * "the one deliberate exception to absent-stays-absent". The abort it was avoiding is real — this
- * was re-measured, and removing the workaround without replacing it reproduces the panic exactly.
- * But the diagnosis in the comment was one level off: the problem is not the field being absent, it
- * is the sub-view representing absence as 0, and the fix belongs here rather than at one call site.
- * Materialising a height also broke a case: for a multi-layer copy the spec *requires*
- * `rowsPerImage`, and supplying `copySize.height` turned "you must state this" into a different
- * request that validates.
+ * `packTexelCopyBufferInfo` used to materialise `rowsPerImage` from `copySize.height` instead. The
+ * abort that avoided is real — removing the workaround without replacing it reproduces the panic —
+ * but the problem is not the field being absent, it is the sub-view representing absence as 0, so
+ * the fix belongs here rather than at one call site. Materialising a height also broke multi-layer
+ * copies, where the spec *requires* `rowsPerImage`: `copySize.height` turned "you must state this"
+ * into a different request that validates.
  */
 export function writeTexelCopyBufferLayout(
   view: CStructView<"WGPUTexelCopyBufferLayout">,

@@ -3,7 +3,7 @@
  *
  * Two are supported, and they are interchangeable at the C ABI: **wgpu-native** (the default, the
  * engine behind Firefox, Servo and Deno) and **Dawn** (the one behind Chromium). They expose the
- * same `webgpu.h` — measured aggregate by aggregate, 92 of them, zero differences — which is why
+ * same `webgpu.h` — the 92 aggregates this binding lays out are field-identical in both — which is why
  * `src/layouts`, `src/desc` and `src/api` are implementation-agnostic and only the loading layer
  * knows there is a choice at all.
  *
@@ -22,7 +22,7 @@
  *
  * An unset variable is the default and never an error. A *misspelled* one is always an error: a
  * typo'd `WGPU_BUN_IMPL=dwan` that silently fell back to wgpu-native would report success while
- * measuring the wrong implementation, which is the failure this package exists to avoid.
+ * measuring the wrong implementation.
  */
 
 /** A supported WebGPU implementation. */

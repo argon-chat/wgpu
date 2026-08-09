@@ -1,14 +1,14 @@
 /**
  * The C-ABI layout engine.
  *
- * `bun:ffi` passes every descriptor by pointer, so this package has to build real C structs inside
- * `ArrayBuffer`s. That means knowing, byte-exactly, where each member sits. This file is the *only*
+ * `bun:ffi` passes every descriptor by pointer, so this package builds real C structs inside
+ * `ArrayBuffer`s, which means knowing byte-exactly where each member sits. This file is the *only*
  * place that decides — from a declarative field list plus the target's scalar sizes, never from a
  * number typed by a human.
  *
  * ── Why this is not the repo's GPU-struct helper ────────────────────────────────────────────────
  *
- * GPU buffer layout (WGSL/std430) and the C ABI are different rule sets that happen to look alike:
+ * GPU buffer layout (WGSL/std430) and the C ABI are different rule sets that look alike:
  *
  *   | | WGSL | C |
  *   |---|---|---|
@@ -19,9 +19,8 @@
  *
  * A layout engine whose alignment table says "align 16" cannot describe `WGPUStringView`
  * (`{ char const* data; size_t length; }`), and importing WGSL's alignment rules into a C boundary
- * is precisely how a pointer ends up written where an integer was expected. So the *discipline* is
- * shared — declarative fields in, derived offsets out, no literal offsets — and the implementation
- * deliberately is not.
+ * is how a pointer ends up written where an integer was expected. The *discipline* is shared —
+ * declarative fields in, derived offsets out, no literal offsets — the implementation is not.
  *
  * ── The rules implemented ───────────────────────────────────────────────────────────────────────
  *
@@ -68,9 +67,9 @@ export interface ICType {
 /**
  * Target-dependent parameters of the C ABI.
  *
- * Only the two genuinely target-dependent widths live here. Everything else in `webgpu.h` is either
- * a fixed-width `<stdint.h>` type, a `float`/`double`, or an aggregate of those — the header uses no
- * `long`, no `long double`, no bitfields and no arrays, which is what makes this model so small.
+ * Only the genuinely target-dependent widths live here. Everything else in `webgpu.h` is a
+ * fixed-width `<stdint.h>` type, a `float`/`double`, or an aggregate of those — the header uses no
+ * `long`, no `long double`, no bitfields and no arrays, which is why this model is so small.
  * {@link assertNoWiderThanModel} enforces that assumption instead of trusting it.
  */
 export interface ICAbiModel {
@@ -93,10 +92,10 @@ export interface ICAbiModel {
 /**
  * The one model this package ships layouts for: 64-bit, natural alignment.
  *
- * Every supported RID — `win32-x64`, `linux-x64`, `linux-arm64`, `darwin-arm64` —
- * lands here. Win64 (LLP64) and the Unix targets (LP64) differ only in `sizeof(long)`, and no member
- * of either header is a `long`, so the resulting layouts are **identical across all four**. See
- * {@link assertHost64Bit} for what happens on anything else.
+ * Every supported RID — `win32-x64`, `linux-x64`, `linux-arm64`, `darwin-arm64` — lands here. Win64
+ * (LLP64) and the Unix targets (LP64) differ only in `sizeof(long)`, and no member of either header
+ * is a `long`, so the layouts are **identical across all four**. See {@link assertHost64Bit} for
+ * anything else.
  */
 export const ABI_64: ICAbiModel = {
   id: "c-abi-64",
@@ -111,10 +110,9 @@ const ARCH64 = new Set(["x64", "arm64", "ppc64", "s390x", "riscv64", "loong64", 
 /**
  * Refuse to run on a target this package has not derived layouts for.
  *
- * The failure this prevents is the quiet one: on a 32-bit host every `ptr`/`usize` member would be
- * 4 bytes, every offset after the first pointer would be wrong, and the binding would write valid
- * -looking garbage into wgpu-native's descriptors. There is no partial correctness to salvage, so
- * this throws rather than degrading.
+ * On a 32-bit host every `ptr`/`usize` member would be 4 bytes, every offset after the first pointer
+ * would be wrong, and the binding would write valid-looking garbage into wgpu-native's descriptors.
+ * There is no partial correctness to salvage, so this throws rather than degrading.
  *
  * @param arch A `process.arch`-style string.
  * @throws when `arch` is not a known 64-bit architecture.
@@ -133,9 +131,8 @@ export function assertHost64Bit(arch: string = process.arch): void {
  * Refuse to run where multi-byte scalars are stored the other way round.
  *
  * Every C struct built by this package is written through a `DataView` with `littleEndian: true`,
- * which is correct on all four supported RIDs and silently wrong anywhere else. This is one branch
- * at startup against a class of corruption that would otherwise present as "the GPU renders
- * garbage".
+ * correct on all four supported RIDs and silently wrong anywhere else. One branch at startup against
+ * corruption that would otherwise present as "the GPU renders garbage".
  *
  * @throws on a big-endian host.
  */

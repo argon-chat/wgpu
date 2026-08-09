@@ -8,7 +8,7 @@
  *   - `data` may be NULL with any length, meaning "no string" — which is not the same as `""` but
  *     is indistinguishable to every consumer in the WebGPU API, so both become `""` here.
  *
- * ── The by-value message parameter, and the bug that lived in this comment ─────────────────────
+ * ── The by-value message parameter ─────────────────────────────────────────────────────────────
  *
  * Every wgpu-native callback takes its `message` as a `WGPUStringView` **by value**, and how it
  * arrives depends on the ABI:
@@ -17,20 +17,12 @@
  * |---|---|---|---|
  * | 16-byte `{ptr, size_t}` argument | size ∉ {1,2,4,8} → **hidden reference** | ≤16 B → **two registers** | INTEGER+INTEGER → **two registers** |
  *
- * Note which way that splits: **Windows is the outlier and the other three agree.** That is the
- * opposite of the 40-byte `*CallbackInfo` case, where SysV is the outlier — same phrase "by value",
- * different rule, different platforms.
+ * **Windows is the outlier and the other three agree** — the opposite of the 40-byte `*CallbackInfo`
+ * case, where SysV is the outlier. Same phrase "by value", different rule, different platforms. A
+ * revision that declared `message` as one pointer shipped on that confusion and hung inside
+ * `requestAdapter` on the other three platforms; `src/ffi/abiSeam.ts` has the full account.
  *
- * An earlier revision of this file stated both halves of that table correctly and then shipped only
- * the Win64 half: the callbacks were declared with `message` as a single pointer. That is right on
- * Windows and wrong on all three of `linux-x64`, `linux-arm64` and `darwin-arm64`, where the callee
- * reads `userdata1` out of the register holding `message.length`. The correlation ticket came back
- * as garbage, {@link import("./async.ts").dispatch} correctly ignored an unknown ticket, and the
- * promise never settled — a hang in `requestAdapter` on three platforms at once, with no ABI error
- * anywhere to point at the cause. It took a CI matrix to find, because the one platform that could
- * be executed locally was the one platform it was right on.
- *
- * So both shapes exist here now, and neither is guessed:
+ * So both shapes exist here, and neither is guessed:
  *
  *   - {@link readStringView} — the pointer form, used **only** on the Win64 direct path.
  *   - {@link decodeStringParts} — the flat `(data, length)` form, fed by the shim's C trampolines,
@@ -70,10 +62,10 @@ export function readStringView(structPtr: number | bigint | null): string {
 /**
  * Decode a `WGPUStringView` that has already been split into its two members.
  *
- * This is the form the shim's C trampolines deliver, and it is the one that is correct everywhere:
- * the aggregate was taken apart by a compiler on the target rather than by a signature derived for
- * one ABI. {@link readStringView} now funnels into it, so there is exactly one decoder and the two
- * entry points differ only in how they got hold of the two numbers.
+ * The form the shim's C trampolines deliver, and the one correct everywhere: the aggregate was taken
+ * apart by a compiler on the target rather than by a signature derived for one ABI.
+ * {@link readStringView} funnels into it, so there is exactly one decoder and the two entry points
+ * differ only in how they got hold of the two numbers.
  *
  * Never throws — it runs inside native callbacks, and an exception crossing back into Rust through a
  * `nounwind` boundary is undefined behaviour, not a stack trace.

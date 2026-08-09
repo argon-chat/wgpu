@@ -147,7 +147,7 @@ export const SYMBOLS = {
   wgpuQuerySetGetCount: { args: [ptr], returns: u32 },
   wgpuQuerySetRelease: { args: [ptr], returns: v },
 
-  // ── free-members: `WGPUSupportedFeatures` is 16 bytes, `WGPUAdapterInfo` 88 — both aggregates
+  // ── free-members: `WGPUSupportedFeatures` is 16 bytes, `WGPUAdapterInfo` 96 — both aggregates
   //    passed BY VALUE, so they belong to the ABI seam, not here. See ./abiSeam.ts.
 } as const satisfies Record<string, { args: readonly FFIType[]; returns: FFIType }>;
 

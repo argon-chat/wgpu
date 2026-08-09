@@ -17,22 +17,20 @@
  *   1. `WGPU_NATIVE_LIB` / `WGPU_BUN_SHIM_LIB` / `WGPU_DAWN_LIB`  — explicit absolute path. Escape
  *                               hatch for a locally built library (bisecting an upstream regression,
  *                               testing an unreleased fix, or a shim built straight out of `cargo`).
- *   2. `@wgpu-bun/<rid>`      — the per-platform npm sub-package, if one is installed. It carries
- *                               **both** libraries, which is what keeps them version-locked: a shim
- *                               is only correct for the wgpu-native generation it was written
- *                               against, and shipping them in one tarball makes separating them
- *                               impossible rather than merely discouraged. Dawn's equivalent is
+ *   2. `@wgpu-bun/<rid>`      — the per-platform npm sub-package, if installed. It carries **both**
+ *                               libraries, which is what keeps them version-locked: a shim is only
+ *                               correct for the wgpu-native generation it was written against, and
+ *                               one tarball makes separating them impossible. Dawn's equivalent is
  *                               `@wgpu-bun/<rid>-dawn`, where "both" is one file by construction.
  *   3. `vendor/<rid>/lib/…`   — what `scripts/fetch-wgpu-native.ts`, `scripts/shim.ts` and
  *                               `scripts/dawn-link.ts` produce.
  *
- * Tier 2 is the path a consumer actually takes — the four `@wgpu-bun/<rid>` packages are published.
- * The ordering is deliberate: ordering the
- * resolver so an npm sub-package simply *wins when present* makes publishing an additive change
- * instead of a rewrite. The cost is one `import.meta.resolve` attempt in a `try`.
+ * Tier 2 is the path a consumer takes — the four `@wgpu-bun/<rid>` packages are published. Ordering
+ * the resolver so an npm sub-package *wins when present* made publishing an additive change rather
+ * than a rewrite, at the cost of one `import.meta.resolve` attempt in a `try`.
  *
- * The shim resolves to `null` rather than throwing when it is absent, because absence is a normal
- * state on every platform whose ABI does not need it — the seam, not the resolver, owns the policy.
+ * The shim resolves to `null` rather than throwing when absent, because absence is normal on every
+ * platform whose ABI does not need it — the seam, not the resolver, owns that policy.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -91,12 +89,10 @@ interface ILibraryKind {
   /**
    * Sibling directory holding this library's own `webgpu.h`, or `null` when it has none.
    *
-   * Named per kind rather than fixed, because both implementations land in the same
-   * `vendor/<rid>/lib` and their headers are **not** interchangeable in the direction that matters:
-   * the header-derived checks in `test/callback-abi.test.ts` read this to enumerate the by-value
-   * callbacks of the library actually loaded. One shared `include/` would have Dawn checked against
-   * wgpu-native's declarations — a check that cannot fail for the wrong reason, which is the worst
-   * kind of check to have.
+   * Named per kind rather than fixed: both implementations land in the same `vendor/<rid>/lib`, and
+   * their headers are **not** interchangeable where it matters. `test/callback-abi.test.ts` reads
+   * this to enumerate the by-value callbacks of the library actually loaded; one shared `include/`
+   * would check Dawn against wgpu-native's declarations — a check that can only ever pass.
    */
   readonly includeDirName: string | null;
 }
@@ -112,9 +108,9 @@ const NATIVE: ILibraryKind = {
  * Dawn, when `WGPU_BUN_IMPL=dawn` selects it.
  *
  * A separate kind rather than a flag on {@link NATIVE}, because every field differs: its own env
- * override, its own file name, its own version stamp, and — see {@link npmPackageFor} — its own npm
- * package, which is opt-in rather than an `optionalDependency` of the main one. What it does *not*
- * differ in is the C API it exposes, which is why nothing above this layer branches on it.
+ * override, file name, version stamp, and — see {@link npmPackageFor} — its own npm package, opt-in
+ * rather than an `optionalDependency`. What does *not* differ is the C API, which is why nothing
+ * above this layer branches on it.
  */
 const DAWN: ILibraryKind = {
   envVar: DAWN_ENV_VAR,
@@ -133,10 +129,10 @@ function kindFor(impl: WgpuImpl): ILibraryKind {
 /**
  * The per-platform npm package for an implementation.
  *
- * `@wgpu-bun/<rid>` carries wgpu-native plus the standalone shim; `@wgpu-bun/<rid>-dawn` carries a
- * single library with both surfaces fused into it. The suffix rather than a separate scope so that
- * one `optionalDependencies` block can name every platform of both, and so an install that lacks
- * Dawn fails with a name that can be searched for rather than with "not found".
+ * `@wgpu-bun/<rid>` carries wgpu-native plus the standalone shim; `@wgpu-bun/<rid>-dawn` carries one
+ * library with both surfaces fused in. A suffix rather than a separate scope, so one
+ * `optionalDependencies` block can name every platform of both and an install lacking Dawn fails
+ * with a searchable name rather than "not found".
  */
 export function npmPackageFor(rid: Rid, impl: WgpuImpl = currentImpl()): string {
   return impl === "dawn" ? `${NPM_SCOPE}/${rid}-dawn` : `${NPM_SCOPE}/${rid}`;
@@ -225,10 +221,9 @@ export function resolveNativeLibrary(
   const found = tryResolveNativeLibrary(rid, platform, impl);
   if (found) return found;
   const kind = kindFor(impl);
-  // Every tier that was tried is named, including the npm sub-package. That matters more than it
-  // looks: `optionalDependencies` fail SILENTLY when no entry matches the platform, so on an
-  // unsupported host this message is the only diagnostic anyone will ever see. Omitting the
-  // package name would leave a user staring at "not found" with nothing to search for.
+  // ⚠ Every tier tried is named, including the npm sub-package: `optionalDependencies` fail SILENTLY
+  // when no entry matches the platform, so on an unsupported host this message is the only
+  // diagnostic anyone will ever see.
   const fix =
     impl === "dawn"
       ? `    bun add ${npmPackageFor(rid, impl)}          (Dawn is opt-in; it is not installed by default)\n` +
@@ -255,10 +250,10 @@ export function resolveNativeLibrary(
 /**
  * Locate the ABI shim for this host, or `null` if it is not installed.
  *
- * There is deliberately no throwing variant. On Win64 and AArch64 an absent shim is not an error —
- * the direct path is correct there — and on SysV the refusal that follows has to explain the ABI, not
- * just the filesystem. Both of those judgements belong to `src/ffi/abiSeam.ts`, which is why this
- * function reports and does not decide.
+ * No throwing variant, deliberately. On Win64 an absent shim is not an error — the direct path is
+ * correct there — and on every other supported ABI the refusal has to explain the ABI, not just the
+ * filesystem. Both judgements belong to `src/ffi/abiSeam.ts`, so this function reports and does not
+ * decide.
  */
 export function tryResolveShimLibrary(
   rid: Rid = currentRid(),
@@ -266,10 +261,9 @@ export function tryResolveShimLibrary(
   impl: WgpuImpl = currentImpl(),
 ): IResolvedNativeLibrary | null {
   // Under Dawn the shim is not a separate file: `scripts/dawn-link.ts` links the same Rust objects
-  // into the Dawn library itself, so a Dawn install is one binary carrying both surfaces. Resolving
-  // it to that library is therefore not a shortcut — it is where the trampolines are. A Dawn library
-  // built without the fuse resolves here too and then fails at the seam's first check, naming the
-  // flat-ABI symbol it could not find, which is the diagnosis worth having.
+  // into the Dawn library, so a Dawn install is one binary carrying both surfaces — this is where
+  // the trampolines are, not a shortcut. A Dawn library built without the fuse resolves here too and
+  // fails at the seam's first check, naming the flat-ABI symbol it could not find.
   if (impl === "dawn") return tryResolveNativeLibrary(rid, platform, impl);
   return walkTiers(SHIM, rid, platform);
 }
