@@ -52,20 +52,15 @@ import {
   sizeOf,
   type ICAggregateLayout,
 } from "../src/layouts/index.ts";
+import { GENERATION_VARIANT_AGGREGATES } from "../wgpu-native.manifest.ts";
+import { isAlternateGeneration, locateVendoredHeaders } from "../scripts/vendoredHeaders.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 /* ── 1. Locate the pinned headers ──────────────────────────────────────────────────────────────── */
 
-function locateIncludeDir(): string {
-  const override = process.env["WGPU_NATIVE_INCLUDE"];
-  if (override) return override;
-  const vendor = path.join(PKG_ROOT, "vendor");
-  const rids = fs.existsSync(vendor) ? fs.readdirSync(vendor).sort() : [];
-  for (const rid of rids) {
-    const dir = path.join(vendor, rid, "include");
-    if (fs.existsSync(path.join(dir, "webgpu.h"))) return dir;
-  }
+const HEADERS = locateVendoredHeaders();
+if (!HEADERS) {
   throw new Error(
     "The layout oracle needs the vendored headers.\n" +
       "  Run:  bun run fetch\n" +
@@ -75,7 +70,29 @@ function locateIncludeDir(): string {
   );
 }
 
-const INCLUDE_DIR = locateIncludeDir();
+const INCLUDE_DIR = HEADERS.dir;
+
+/** True when the vendored headers are a supported generation other than the one this package ships. */
+const ALTERNATE_GENERATION = isAlternateGeneration(HEADERS);
+
+/**
+ * Aggregates to leave out of the probe on an alternate generation.
+ *
+ * `wgpu.h`'s extension inventory moves between generations: `WGPUXlibDisplayHandle` does not exist
+ * in v27 at all, so a probe that asks a C compiler for its `sizeof` does not fail an assertion — it
+ * fails to compile, taking the whole oracle with it. Those names are declared in
+ * `GENERATION_VARIANT_AGGREGATES`, none of them is used by the binding, and
+ * `test/generations.test.ts` is what keeps that true.
+ *
+ * Everything else is still measured. The exclusion is by name, never by "skip what did not
+ * compile" — a compile error for any other reason must still be a failure.
+ */
+const EXCLUDED = new Set(ALTERNATE_GENERATION ? GENERATION_VARIANT_AGGREGATES : []);
+
+/** Is this layout (or the parent it is a member of) excluded? */
+function isExcluded(name: string): boolean {
+  return EXCLUDED.has(name) || EXCLUDED.has(name.split("::")[0]!);
+}
 
 /* ── 2. The C shim Bun does not provide ────────────────────────────────────────────────────────── */
 
@@ -213,7 +230,7 @@ ${body.join("\n")}
 
 /* ── 4. Compile and run, once ──────────────────────────────────────────────────────────────────── */
 
-const layouts = registry.layoutAll();
+const layouts = registry.layoutAll().filter((l) => !isExcluded(l.name));
 const { source, slots } = emitProbe(layouts);
 
 const shimDir = writeShim();
@@ -254,7 +271,7 @@ slots.forEach((slot, i) => {
 /* ── 5. The assertions ─────────────────────────────────────────────────────────────────────────── */
 
 describe("derived C layouts vs. the C compiler", () => {
-  test("the headers being compiled are the headers the tables were generated from", () => {
+  test.skipIf(ALTERNATE_GENERATION)("the headers being compiled are the headers the tables were generated from", () => {
     for (const { file, sha256 } of HEADER_DIGESTS) {
       // LF-normalised, matching how `gen-layouts.ts` computes the digest it stores. Upstream ships
       // the same headers with CRLF in the Windows archive and LF in the others, so a raw-byte hash
@@ -270,8 +287,19 @@ describe("derived C layouts vs. the C compiler", () => {
     }
   });
 
+  test.skipIf(!ALTERNATE_GENERATION)("on another generation, only the declared aggregates are left out", () => {
+    // The digest test above cannot hold here: the tables were generated from the SHIPPED
+    // generation's headers, and these are not those headers. What still has to hold is that the
+    // exclusion list did not quietly grow — every aggregate not named in
+    // GENERATION_VARIANT_AGGREGATES is compiled and measured, on this generation, like any other.
+    const skipped = Object.keys(ALL_AGGREGATES).filter((n) => isExcluded(n)).sort();
+    const allowed = [...GENERATION_VARIANT_AGGREGATES].filter((n) => n in ALL_AGGREGATES).sort();
+    expect(skipped).toEqual(allowed);
+    expect(layouts.length).toBeGreaterThan(100);
+  });
+
   test("every aggregate in the tables is checked — no sampling", () => {
-    const declared = Object.keys(ALL_AGGREGATES).sort();
+    const declared = Object.keys(ALL_AGGREGATES).filter((n) => !isExcluded(n)).sort();
     const checked = [...byAggregate.keys()].sort();
     expect(checked).toEqual(declared);
     expect(declared.length).toBeGreaterThan(100);

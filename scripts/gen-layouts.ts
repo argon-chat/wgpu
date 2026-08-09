@@ -37,6 +37,7 @@ import {
   currentRid,
   generation,
 } from "../wgpu-native.manifest.ts";
+import { locateVendoredHeaders } from "./vendoredHeaders.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(PKG_ROOT, "src", "layouts", "generated");
@@ -49,63 +50,26 @@ interface IHeaderSource {
   readonly sha256: string;
 }
 
-/**
- * Find a vendored `include/` directory.
- *
- * Any RID's headers will do: they are the same upstream `ffi/` sources, and the layouts derived from
- * them are identical across every 64-bit target (see `cabi.ts`). The RID actually used is recorded
- * in the provenance file so that claim stays checkable rather than assumed.
- *
- * ⚠ They are NOT byte-identical, which an earlier revision of this comment claimed. The Windows
- * release archive ships the headers with CRLF and the Linux/macOS archives with LF; strip the CR and
- * the two hash the same. That difference is invisible to everything here except a raw byte hash —
- * see {@link readHeader}.
- */
+/** Locate the headers to read. The rule itself lives in `./vendoredHeaders.ts`. */
 function locateIncludeDir(): { rid: string; dir: string } {
-  const override = process.env["WGPU_NATIVE_INCLUDE"];
-  if (override) return { rid: "env:WGPU_NATIVE_INCLUDE", dir: override };
-
-  const vendor = path.join(PKG_ROOT, "vendor");
-  const rids = fs.existsSync(vendor) ? fs.readdirSync(vendor).sort() : [];
-  const has = (rid: string) => fs.existsSync(path.join(vendor, rid, "include", "webgpu.h"));
-
-  // ⚠ THIS HOST'S RID FIRST, not the alphabetically first one that happens to have headers.
-  //
-  // "any RID will do" held while `vendor/` could only ever hold one generation. `bun run fetch
-  // --generation <n>` broke that: it installs into `vendor/<this rid>/`, leaving cross-fetched
-  // copies of other platforms at whatever generation they were fetched at. Sorted order then picks
-  // `darwin-arm64` — so `check:layouts` validated the committed tables against a DIFFERENT
-  // generation's headers than the one just installed, and reported a clean bill.
-  //
-  // That is exactly the shape of failure this file exists to prevent, aimed at itself: it did not
-  // produce a wrong answer, it produced a right answer to the wrong question, and only a CI leg
-  // with a single vendored RID could see it.
-  const preferred = [currentRid(), ...rids].filter((rid, i, all) => all.indexOf(rid) === i);
-  for (const rid of preferred) {
-    if (has(rid)) {
-      // A mixed vendor tree is legitimate (cross-fetching stages a release), but silently choosing
-      // between generations is not. Say which one is being read when they disagree.
-      const versions = new Map<string, string>();
-      for (const other of rids) {
-        const stamp = path.join(vendor, other, ".version");
-        if (has(other) && fs.existsSync(stamp)) versions.set(other, fs.readFileSync(stamp, "utf-8").trim());
-      }
-      const distinct = new Set(versions.values());
-      if (distinct.size > 1) {
-        const listed = [...versions].map(([r, v]) => `${r}=${v}`).join(", ");
-        console.warn(
-          `warn   vendor/ holds more than one wgpu-native generation (${listed}).\n` +
-            `       Reading ${rid}'s headers. Set WGPU_NATIVE_INCLUDE to choose deliberately.`,
-        );
-      }
-      return { rid, dir: path.join(vendor, rid, "include") };
-    }
+  const found = locateVendoredHeaders();
+  if (!found) {
+    throw new Error(
+      "No vendored headers found.\n" +
+        "  Run:  bun run fetch\n" +
+        "  Or point WGPU_NATIVE_INCLUDE at a directory holding webgpu.h and wgpu.h.",
+    );
   }
-  throw new Error(
-    "No vendored headers found.\n" +
-      "  Run:  bun run fetch\n" +
-      "  Or point WGPU_NATIVE_INCLUDE at a directory holding webgpu.h and wgpu.h.",
-  );
+  if (found.mixed.length > 0) {
+    // A mixed vendor tree is legitimate (cross-fetching stages a release), but silently choosing
+    // between generations is not. Say which one is being read.
+    console.warn(
+      `warn   vendor/ holds more than one wgpu-native generation (${found.mixed.join(", ")}).\n` +
+        `       Reading ${found.rid ?? "the overridden directory"}. ` +
+        `Set WGPU_NATIVE_INCLUDE to choose deliberately.`,
+    );
+  }
+  return { rid: found.rid ?? "env:WGPU_NATIVE_INCLUDE", dir: found.dir };
 }
 
 /**
@@ -521,15 +485,6 @@ export const UNION_NAMES = ${JSON.stringify(unions)} as const;
   return { files, rid };
 }
 
-/** The generation of the headers that were read, from the RID's own `.version` stamp. */
-function vendoredGeneration(rid: string): number | null {
-  const stamp = path.join(PKG_ROOT, "vendor", rid, ".version");
-  if (!fs.existsSync(stamp)) return null;
-  const tag = fs.readFileSync(stamp, "utf-8").trim();
-  const m = /^v(\d+)\./.exec(tag);
-  return m ? Number(m[1]) : null;
-}
-
 /**
  * Aggregate name -> its member list, read back out of an emitted table.
  *
@@ -618,7 +573,7 @@ function main(): void {
   // whole files would then fail for a reason that is not a defect, and lowering the check to a
   // warning would retire the one thing it is for. So the comparison narrows instead of loosening:
   // aggregate by aggregate, and only the declared names may move.
-  const vendored = vendoredGeneration(rid);
+  const vendored = locateVendoredHeaders()?.generation ?? null;
   const alternate = check && vendored !== null && vendored !== DEFAULT_GENERATION;
 
   let stale = 0;
