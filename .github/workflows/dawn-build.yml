@@ -42,6 +42,12 @@
 # ⚠ `linux-arm64` is absent because Google publishes no arm64 Linux desktop build. That platform
 # needs a source build (~20 min on an arm64 runner), which is a different job and is not here yet.
 
+# Each leg then **runs the whole test suite against what it just built**, with `WGPU_BUN_IMPL=dawn`.
+# That is the part that makes the rest worth anything: exporting 292 symbols proves a link, not an
+# implementation, and every difference between Dawn and wgpu-native found so far — three absent entry
+# points, a consumed adapter, a by-value logging callback, a missing DXC — surfaced by running, never
+# by reading.
+
 name: dawn-build
 
 on:
@@ -57,7 +63,12 @@ on:
       # including the seam's `SHIM_EXPORTS`, which is the list the export filters are built from.
       - "scripts/shimBuild.ts"
       - "shim/**"
-      - "src/ffi/abiSeam.ts"
+      # The binding itself, because this job now *runs* the suite against Dawn. A filter that fired
+      # only on Dawn-specific files would let an ordinary change to `src/` break Dawn and stay
+      # invisible until the next time someone edited something Dawn-shaped. The cost is a re-link on
+      # most pushes — ~2 minutes per leg, in parallel — and that is the cheaper side of the trade.
+      - "src/**"
+      - "test/**"
       - ".github/workflows/dawn-build.yml"
   pull_request:
     paths: *dawn_paths
@@ -115,6 +126,54 @@ jobs:
         env:
           DAWN_LINK_CONTAINER: ${{ matrix.container }}
         run: bun run dawn:link --rid ${{ matrix.rid }}
+
+      # ── proving it runs ───────────────────────────────────────────────────────────────────────
+      #
+      # Linking is not evidence. A library can export all 292 names and fail on the first call, and
+      # everything below this line exists because that distinction has already cost this repository
+      # several rounds. The suite that runs here is the *same* suite wgpu-native runs — not a smoke
+      # test written to pass.
+
+      - name: Fetch wgpu-native as well
+        # Some suites assert facts about wgpu-native specifically (its export table, its
+        # abort-symbol partition) and pin themselves to it regardless of WGPU_BUN_IMPL. Without the
+        # library present they skip, and a Dawn leg that quietly ran two thirds of the corpus would
+        # report a pass it did not earn.
+        run: bun run fetch
+
+      - name: Install a Vulkan driver
+        if: matrix.rid == 'linux-x64'
+        # lavapipe, the same CPU driver the main CI uses. Dawn on Linux has no other adapter here:
+        # the runner has no GPU, and without this `requestAdapter()` returns null.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+
+      - name: Put DXC beside the library
+        if: matrix.rid == 'win32-x64'
+        shell: pwsh
+        # Dawn's D3D12 backend compiles WGSL to DXIL through DXC, loaded dynamically at device
+        # creation. Google's archive ships neither DLL; the Windows SDK on this image does. Measured
+        # failure without them, quoted so the next reader does not have to reproduce it:
+        #   requestDevice failed (status 3) DynamicLib.Open: dxil.dll Windows Error: 87
+        #       at EnsureDXCLibraries (dawn/native/d3d12/PlatformFunctionsD3D12.cpp:212)
+        run: |
+          $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxil.dll" -ErrorAction SilentlyContinue |
+                 Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $sdk) { throw "no dxil.dll under the Windows SDK on this image — Dawn's D3D12 backend cannot create a device without DXC" }
+          foreach ($dll in @("dxil.dll", "dxcompiler.dll")) {
+            $src = Join-Path $sdk.Directory $dll
+            if (-not (Test-Path $src)) { throw "$dll is missing next to $($sdk.FullName)" }
+            Copy-Item $src -Destination "vendor/${{ matrix.rid }}/lib/"
+          }
+          Write-Host "DXC from $($sdk.Directory)"
+
+      - name: Run the suite against Dawn
+        env:
+          WGPU_BUN_IMPL: dawn
+        # No `continue-on-error`, and no reduced selection. If Dawn cannot run this, the library this
+        # job just built has no business being uploaded.
+        run: bun test
 
       - name: Upload the library
         uses: actions/upload-artifact@v4
