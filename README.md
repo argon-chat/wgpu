@@ -37,7 +37,7 @@ matching your `os`/`cpu`. No install hook, no toolchain, no `cargo`.
 <img src="docs/media/sky.png" alt="A physically-based sunset rendered headless by wgpu-bun" width="100%">
 
 Not a mock-up: that is [`examples/sky.ts`](examples/sky.ts), a WGSL port of
-[RedPewEngine](https://github.com/argon-chat)'s Hillaire atmosphere, in four passes — two compute
+[RedPewEngine](https://pew.red)'s Hillaire atmosphere, in four passes — two compute
 kernels build the transmittance and multiple-scattering tables, a third ray-marches the sky into a
 192×108 image, and a fullscreen shader adds an analytic sun disc and exposes the result.
 

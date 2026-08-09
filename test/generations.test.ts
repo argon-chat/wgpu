@@ -18,8 +18,10 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { FIRST_GENERATION, UNIMPLEMENTED, existsInGeneration } from "../src/ffi/unimplemented.ts";
+import { WEBGPU_AGGREGATES } from "../src/layouts/generated/webgpu.structs.ts";
 import {
   DEFAULT_GENERATION,
+  GENERATION_VARIANT_AGGREGATES,
   GENERATIONS,
   SUPPORTED_GENERATIONS,
   WGPU_NATIVE_MAJOR,
@@ -91,6 +93,58 @@ describe("every supported generation is actually installable", () => {
       supportedRids(major).map((rid) => assetFor(rid, major)!.url),
     );
     expect(new Set(urls).size).toBe(urls.length);
+  });
+});
+
+describe("aggregates whose layout moves between generations", () => {
+  /** Every `.ts` under `src/`, minus the generated tables — which are where these names live. */
+  function sourceFiles(dir: string, out: string[] = []): string[] {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (entry.name !== "generated") sourceFiles(p, out);
+      } else if (p.endsWith(".ts")) {
+        out.push(p);
+      }
+    }
+    return out;
+  }
+
+  test("not one of them is named anywhere in src/", () => {
+    // This is the assertion that makes `check:layouts` safe to relax on a non-default generation.
+    // The relaxation says "these may differ"; it is only defensible while the binding never packs,
+    // reads or names one of them. The moment it does, the tolerance is hiding a real ABI break —
+    // so the tolerance is bound to the fact that justifies it, in the same suite.
+    //
+    // `src/layouts/generated/**` is excluded because that is the inventory of the headers, not use.
+    const offenders: string[] = [];
+    for (const file of sourceFiles(path.join(PKG_ROOT, "src"))) {
+      const src = fs.readFileSync(file, "utf-8");
+      for (const [i, line] of src.split("\n").entries()) {
+        // A comment naming one as an example is documentation, not use.
+        if (/^\s*(\/\/|\*|\/\*)/.test(line)) continue;
+        for (const name of GENERATION_VARIANT_AGGREGATES) {
+          if (line.includes(name)) {
+            offenders.push(`${path.relative(PKG_ROOT, file)}:${i + 1}: ${name}`);
+          }
+        }
+      }
+    }
+    expect(
+      offenders,
+      "these aggregates are declared to differ between wgpu-native generations, so the binding " +
+        "must not depend on their layout:\n\n" + offenders.join("\n"),
+    ).toEqual([]);
+  });
+
+  test("each one is a wgpu.h extension, never a core webgpu.h aggregate", () => {
+    // The claim being defended is narrow and worth keeping narrow: `webgpu.h` — everything the
+    // binding actually packs — is identical across the supported generations, and only
+    // wgpu-native's own extension header moves. A core aggregate appearing in this list would mean
+    // that claim had quietly become false.
+    const core = Object.keys(WEBGPU_AGGREGATES);
+    const fromCore = GENERATION_VARIANT_AGGREGATES.filter((name) => core.includes(name));
+    expect(fromCore).toEqual([]);
   });
 });
 

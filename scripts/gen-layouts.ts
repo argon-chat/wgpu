@@ -31,6 +31,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import {
+  DEFAULT_GENERATION,
+  GENERATION_VARIANT_AGGREGATES,
+  currentRid,
+  generation,
+} from "../wgpu-native.manifest.ts";
+
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const OUT_DIR = path.join(PKG_ROOT, "src", "layouts", "generated");
 
@@ -60,9 +67,39 @@ function locateIncludeDir(): { rid: string; dir: string } {
 
   const vendor = path.join(PKG_ROOT, "vendor");
   const rids = fs.existsSync(vendor) ? fs.readdirSync(vendor).sort() : [];
-  for (const rid of rids) {
-    const dir = path.join(vendor, rid, "include");
-    if (fs.existsSync(path.join(dir, "webgpu.h"))) return { rid, dir };
+  const has = (rid: string) => fs.existsSync(path.join(vendor, rid, "include", "webgpu.h"));
+
+  // ⚠ THIS HOST'S RID FIRST, not the alphabetically first one that happens to have headers.
+  //
+  // "any RID will do" held while `vendor/` could only ever hold one generation. `bun run fetch
+  // --generation <n>` broke that: it installs into `vendor/<this rid>/`, leaving cross-fetched
+  // copies of other platforms at whatever generation they were fetched at. Sorted order then picks
+  // `darwin-arm64` — so `check:layouts` validated the committed tables against a DIFFERENT
+  // generation's headers than the one just installed, and reported a clean bill.
+  //
+  // That is exactly the shape of failure this file exists to prevent, aimed at itself: it did not
+  // produce a wrong answer, it produced a right answer to the wrong question, and only a CI leg
+  // with a single vendored RID could see it.
+  const preferred = [currentRid(), ...rids].filter((rid, i, all) => all.indexOf(rid) === i);
+  for (const rid of preferred) {
+    if (has(rid)) {
+      // A mixed vendor tree is legitimate (cross-fetching stages a release), but silently choosing
+      // between generations is not. Say which one is being read when they disagree.
+      const versions = new Map<string, string>();
+      for (const other of rids) {
+        const stamp = path.join(vendor, other, ".version");
+        if (has(other) && fs.existsSync(stamp)) versions.set(other, fs.readFileSync(stamp, "utf-8").trim());
+      }
+      const distinct = new Set(versions.values());
+      if (distinct.size > 1) {
+        const listed = [...versions].map(([r, v]) => `${r}=${v}`).join(", ");
+        console.warn(
+          `warn   vendor/ holds more than one wgpu-native generation (${listed}).\n` +
+            `       Reading ${rid}'s headers. Set WGPU_NATIVE_INCLUDE to choose deliberately.`,
+        );
+      }
+      return { rid, dir: path.join(vendor, rid, "include") };
+    }
   }
   throw new Error(
     "No vendored headers found.\n" +
@@ -428,7 +465,13 @@ export function isUnion(name: string): boolean {
 
 /* ── Entry point ───────────────────────────────────────────────────────────────────────────────── */
 
-function build(): Map<string, string> {
+interface IBuild {
+  readonly files: Map<string, string>;
+  /** The RID whose headers were read — the generation check reports against its `.version`. */
+  readonly rid: string;
+}
+
+function build(): IBuild {
   const { rid, dir } = locateIncludeDir();
   const webgpu = readHeader(dir, "webgpu.h");
   const wgpu = readHeader(dir, "wgpu.h");
@@ -475,19 +518,127 @@ export const UNION_NAMES = ${JSON.stringify(unions)} as const;
     }),
   );
   files.set("index.ts", INDEX_SOURCE);
-  return files;
+  return { files, rid };
+}
+
+/** The generation of the headers that were read, from the RID's own `.version` stamp. */
+function vendoredGeneration(rid: string): number | null {
+  const stamp = path.join(PKG_ROOT, "vendor", rid, ".version");
+  if (!fs.existsSync(stamp)) return null;
+  const tag = fs.readFileSync(stamp, "utf-8").trim();
+  const m = /^v(\d+)\./.exec(tag);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Aggregate name -> its member list, read back out of an emitted table.
+ *
+ * Parsed from the emitted text rather than imported, because the committed file and the freshly
+ * derived one have to be read the same way: importing one and parsing the other would make a
+ * formatting change look like a layout change.
+ *
+ * WARNING - a line scanner, not a multi-line regex, and deliberately so. The first version of this
+ * was a regex that silently matched NOTHING (a stray control byte where a backreference belonged).
+ * Every comparison then found zero differing aggregates, so the check passed on any input at all.
+ * A parser that returns an empty map is indistinguishable from a clean bill of health, which is why
+ * `undeclaredDifferences` refuses an empty parse outright instead of trusting it.
+ */
+function aggregateEntries(text: string): Map<string, string> {
+  const out = new Map<string, string>();
+  const lines = text.split("\n");
+  for (let i = 0; i < lines.length; i++) {
+    // `  Name: [` or `  "Name::member": [` - the emitter's only shape, two spaces of indent.
+    const head = /^ {2}"?([A-Za-z_][\w:]*)"?: \[(.*)$/.exec(lines[i]!);
+    if (!head) continue;
+    let body = head[2]!;
+    while (!body.trimEnd().endsWith("],") && i + 1 < lines.length) {
+      i += 1;
+      body += " " + lines[i]!.trim();
+    }
+    out.set(head[1]!, body.replace(/\],\s*$/, "").replace(/\s+/g, " ").trim());
+  }
+  return out;
+}
+
+/**
+ * Compare a generated table against its committed form, tolerating only the aggregates declared to
+ * move between generations.
+ *
+ * Returns the offending names — empty means the difference is entirely accounted for.
+ */
+function undeclaredDifferences(committed: string, derived: string): string[] {
+  const a = aggregateEntries(committed);
+  const b = aggregateEntries(derived);
+  // Nothing parsed means the reader is broken, not that the tables agree. Without this the whole
+  // comparison degrades to "no differences found" on every input - which is how it shipped once.
+  if (a.size === 0 || b.size === 0) {
+    throw new Error(
+      `aggregateEntries parsed ${a.size} committed and ${b.size} derived aggregates - the emitted ` +
+        `table format and this reader have diverged. Fix the reader; do not treat this as a pass.`,
+    );
+  }
+  return diffNames(a, b);
+}
+
+/** Names present in only one map, or present in both with different members, minus the declared set. */
+function diffNames(a: Map<string, string>, b: Map<string, string>): string[] {
+  const allowed = new Set(GENERATION_VARIANT_AGGREGATES);
+  const offenders: string[] = [];
+  for (const name of new Set([...a.keys(), ...b.keys()])) {
+    if (allowed.has(name)) continue;
+    if (a.get(name) !== b.get(name)) offenders.push(name);
+  }
+  return offenders.sort();
+}
+
+/**
+ * The same question for `unions.ts`, which carries a list of names rather than a table of members.
+ *
+ * It needs its own reader: the aggregate scanner finds nothing in it — legitimately — and "found
+ * nothing" must never be allowed to read as "found no differences".
+ */
+function undeclaredUnionDifferences(committed: string, derived: string): string[] {
+  const names = (text: string): Map<string, string> => {
+    const m = /UNION_NAMES = \[([\s\S]*?)\]/.exec(text);
+    if (!m) throw new Error("unions.ts no longer declares UNION_NAMES the way this reader expects");
+    const out = new Map<string, string>();
+    for (const q of m[1]!.matchAll(/"([^"]+)"/g)) out.set(q[1]!, "union");
+    return out;
+  };
+  return diffNames(names(committed), names(derived));
 }
 
 function main(): void {
   const check = process.argv.includes("--check");
-  const files = build();
+  const { files, rid } = build();
   fs.mkdirSync(OUT_DIR, { recursive: true });
+
+  // On a generation other than the one this package ships, the committed tables are EXPECTED to
+  // disagree about `wgpu.h`'s extension inventory — see GENERATION_VARIANT_AGGREGATES. Comparing
+  // whole files would then fail for a reason that is not a defect, and lowering the check to a
+  // warning would retire the one thing it is for. So the comparison narrows instead of loosening:
+  // aggregate by aggregate, and only the declared names may move.
+  const vendored = vendoredGeneration(rid);
+  const alternate = check && vendored !== null && vendored !== DEFAULT_GENERATION;
 
   let stale = 0;
   for (const [name, text] of files) {
     const dest = path.join(OUT_DIR, name);
     const existing = fs.existsSync(dest) ? fs.readFileSync(dest, "utf-8") : null;
     if (existing === text) continue;
+
+    if (check && alternate) {
+      // `provenance.ts` records which headers were read; on another generation it differs by
+      // definition and says nothing about layouts.
+      if (name === "provenance.ts") continue;
+      const compare = name === "unions.ts" ? undeclaredUnionDifferences : undeclaredDifferences;
+      const offenders = existing === null ? ["<file missing>"] : compare(existing, text);
+      if (offenders.length === 0) continue;
+      stale += 1;
+      console.error(`stale: src/layouts/generated/${name} — ${offenders.join(", ")}`);
+      continue;
+    }
+
     if (check) {
       stale += 1;
       console.error(`stale: src/layouts/generated/${name}`);
@@ -499,12 +650,30 @@ function main(): void {
 
   if (check && stale > 0) {
     console.error(
-      `\n${stale} generated file(s) differ from the vendored headers.\n` +
-        `Run: bun run scripts/gen-layouts.ts`,
+      alternate
+        ? `
+${stale} generated file(s) disagree with wgpu-native generation ${vendored} on an ` +
+            `aggregate that is NOT declared generation-variant.
+` +
+            `That is a real layout move: either the binding must stop using it, or generation ` +
+            `${vendored} must stop being supported.
+` +
+            `See GENERATION_VARIANT_AGGREGATES in wgpu-native.manifest.ts.`
+        : `
+${stale} generated file(s) differ from the vendored headers.
+` +
+            `Run: bun run scripts/gen-layouts.ts`,
     );
     process.exit(1);
   }
-  if (check) console.log("generated layouts are up to date with the vendored headers");
+  if (check) {
+    console.log(
+      alternate
+        ? `generated layouts hold for wgpu-native generation ${vendored} ` +
+            `(ships ${generation(DEFAULT_GENERATION).tag}); only declared extension aggregates differ`
+        : "generated layouts are up to date with the vendored headers",
+    );
+  }
 }
 
 main();

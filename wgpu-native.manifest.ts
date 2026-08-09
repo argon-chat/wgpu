@@ -147,6 +147,52 @@ export const GENERATIONS: Readonly<Record<number, IGeneration>> = {
 };
 
 /**
+ * C aggregates whose layout is **not** the same across the supported generations.
+ *
+ * Every one of these lives in `wgpu.h` — wgpu-native's own extensions — and not one of them is
+ * packed, read or named by this binding. The 115 aggregates of `webgpu.h`, which is everything the
+ * binding actually touches, are identical across v27 and v29.
+ *
+ * ── Why this list exists rather than a looser check ─────────────────────────────────────────────
+ *
+ * `check:layouts` compares the committed tables against the vendored headers byte for byte. On a
+ * non-default generation that comparison fails on these names, and the tempting fixes are both
+ * wrong: regenerating per generation would commit tables that are stale for the shipped one, and
+ * relaxing the check to "close enough" would stop catching the thing it exists for — a member
+ * inserted into the middle of a struct the binding packs.
+ *
+ * So the difference is *declared*. `check:layouts` permits exactly these to differ on a
+ * non-default generation and nothing else, and `test/generations.test.ts` asserts that none of them
+ * appears anywhere in `src/`. The day a generation moves an aggregate the binding does use, that is
+ * a hard failure with a name attached — which is the outcome worth engineering for.
+ *
+ * ⚠ How this was found: `check:layouts` passed locally and failed on all four v27 CI legs. The
+ * generator picked the alphabetically-first vendored RID, and a developer machine with four
+ * cross-fetched platforms had `darwin-arm64` still on v29 — so the local check validated the right
+ * tables against the wrong generation's headers and reported success. Only a runner with one
+ * vendored RID could see it. The finder now prefers the host's own RID and warns on a mixed tree.
+ */
+export const GENERATION_VARIANT_AGGREGATES: readonly string[] = [
+  // v29 added a display-handle chain to WGPUInstanceExtras; v27 has none of these types.
+  "WGPUXlibDisplayHandle",
+  "WGPUXcbDisplayHandle",
+  "WGPUWaylandDisplayHandle",
+  "WGPUNativeDisplayHandle",
+  "WGPUNativeDisplayHandle::data",
+  "WGPUImageSubresourceRange",
+  // Present in both, different members. `WGPUInstanceExtras` differs only by a trailing field, so a
+  // v29-shaped write is a superset a v27 library ignores — but it is still a difference, and the
+  // binding does not write it either way (backend selection uses `WGPURequestAdapterOptions`).
+  "WGPUInstanceExtras",
+  "WGPUNativeLimits",
+  // v29-only: border-colour sampling, which v27's extension header does not have at all.
+  "WGPUSamplerDescriptorExtras",
+  // v27-only: push constants, which v29 dropped from the extension header.
+  "WGPUPushConstantRange",
+  "WGPUPipelineLayoutExtras",
+];
+
+/**
  * Every supported generation, newest first.
  *
  * Note the gap: upstream published v25, then v27, then v29 — there is no v26 or v28. The list is
