@@ -214,7 +214,7 @@ export class GPUCommandEncoder extends GPUResource {
     const arena = new Arena();
     wgpu().wgpuCommandEncoderCopyBufferToTexture(
       this.handle,
-      packTexelCopyBufferInfo(arena, source, copySize),
+      packTexelCopyBufferInfo(arena, source),
       packTexelCopyTextureInfo(arena, destination),
       packExtent3D(arena, copySize),
     );
@@ -229,7 +229,7 @@ export class GPUCommandEncoder extends GPUResource {
     wgpu().wgpuCommandEncoderCopyTextureToBuffer(
       this.handle,
       packTexelCopyTextureInfo(arena, source),
-      packTexelCopyBufferInfo(arena, destination, copySize),
+      packTexelCopyBufferInfo(arena, destination),
       packExtent3D(arena, copySize),
     );
   }

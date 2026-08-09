@@ -90,7 +90,9 @@
     "derive:aborts:probe": "bun run scripts/derive-unimplemented.ts",
     "release:check": "bun run scripts/release-platform-packages.ts --check",
     "release:stage": "bun run scripts/release-platform-packages.ts",
-    "release:wire": "bun run scripts/release-platform-packages.ts --wire"
+    "release:wire": "bun run scripts/release-platform-packages.ts --wire",
+    "release:check:dawn": "bun run scripts/release-platform-packages.ts --impl dawn --check",
+    "release:stage:dawn": "bun run scripts/release-platform-packages.ts --impl dawn"
   },
   "devDependencies": {
     "@types/bun": "^1.3.8",

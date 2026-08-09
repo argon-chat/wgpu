@@ -32,6 +32,29 @@ layouts by hand and is only correct paired with it — the binding checks for sk
 but shipping them together makes the skewed state unreachable. Neither is fetched at install time,
 and **no consumer needs a Rust toolchain**: CI builds the shim, one platform per matching runner.
 
+### Dawn: three more packages, and they are opt-in
+
+`@wgpu-bun/<rid>-dawn` — `win32-x64`, `linux-x64`, `darwin-arm64` — each carrying **one** library,
+because `dawn:link` fuses the ABI shim's objects into the Dawn library itself. A suffix on the same
+scope rather than a scope of its own, so a missing install fails with a name that can be searched
+for. `linux-arm64` is absent because Google publishes no arm64 Linux desktop build.
+
+**They are never wired into `optionalDependencies`.** An optional dependency installs by default, and
+a consumer who never types `WGPU_BUN_IMPL=dawn` should not be downloading a second WebGPU
+implementation of 10–20 MiB. So `bun run release:wire --impl dawn` refuses outright rather than doing
+something reasonable-looking; installing Dawn means typing the package name.
+
+The libraries are linked by the same workflow that gates every push
+([dawn-build](../.github/workflows/dawn-build.yml)), called from the release rather than copied into
+it, and each leg runs the whole suite against what it just linked. Preflight additionally refuses any
+Dawn package whose library does not export the fused shim — a package missing the trampolines would
+install, load, and then fail on the first by-value call, which is not something a directory listing
+can show, since the package is one file either way.
+
+Dawn's own terms ship as `LICENSE-DAWN`, copied verbatim from the pinned commit, under the same rule
+as wgpu-native's: neither project puts a licence file in its release archive, so this is the only
+copy that reaches a consumer.
+
 ### Why not a postinstall hook
 
 **`bun install` does not run lifecycle scripts of installed dependencies.** Bun is default-secure:

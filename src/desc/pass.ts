@@ -21,7 +21,7 @@
  * clear value and therefore cannot double as "unspecified".
  */
 
-import type { Arena } from "./build.ts";
+import { U32_UNDEFINED, type Arena } from "./build.ts";
 import { LOAD_OP, STORE_OP, TEXTURE_ASPECT, toEnum } from "../enums.ts";
 import type { Ptr } from "../ffi/pointer.ts";
 import type { CStructView } from "../layouts/index.ts";
@@ -117,44 +117,56 @@ export function packRenderPassDescriptor(
 /**
  * `WGPUTexelCopyBufferInfo` — the buffer half of a texture copy.
  *
- * ⚠ **`rowsPerImage` is materialised here, and this is the one deliberate exception to "absent
- * stays absent".** An omitted `rowsPerImage` reaching `wgpuCommandEncoderCopyTextureToBuffer` or
- * `…CopyBufferToTexture` does not produce a validation error — it **panics** in `conv.rs`
- * (`invalid rowsPerImage`) and aborts the process. Measured, not inferred: the same copy survives
- * when the field is supplied and dies when it is not.
- *
- * This is safe to fill in precisely because the value is not invented. The WebGPU spec defines the
- * default as `copySize.height` whenever the copy covers a single layer, so writing it changes
- * nothing about what is requested — unlike `mipLevelCount`, where a materialised default is a
- * *different* request that validates and renders wrong.
- *
- * `wgpuQueueWriteTexture` is **not** given the same treatment: it accepts an absent `rowsPerImage`
- * happily, and supplying one on a single-image 2D copy is known to trip its texel-height check.
- * Two entry points, two behaviours, one field.
+ * Absent stays absent, like every other optional field here. What makes that true across both the
+ * copy and `writeTexture` paths is {@link writeTexelCopyBufferLayout}, which writes the "unset"
+ * sentinel explicitly rather than trusting a fresh buffer to already hold it — read the note there
+ * before changing anything about the strides.
  */
-export function packTexelCopyBufferInfo(
-  arena: Arena,
-  info: GPUTexelCopyBufferInfo,
-  copySize?: GPUExtent3D,
-): Ptr {
+export function packTexelCopyBufferInfo(arena: Arena, info: GPUTexelCopyBufferInfo): Ptr {
   const d = arena.struct("WGPUTexelCopyBufferInfo");
   d.setPtr("buffer", (info.buffer as unknown as IHandleOwner).handle);
-  const layout = d.sub("layout");
-  writeTexelCopyBufferLayout(layout, info);
-  if (info.rowsPerImage === undefined && copySize !== undefined) {
-    layout.setU32("rowsPerImage", extentDims(copySize).height);
-  }
+  writeTexelCopyBufferLayout(d.sub("layout"), info);
   return arena.hold(d);
 }
 
-/** The `offset` / `bytesPerRow` / `rowsPerImage` triple, shared by copies and `writeTexture`. */
+/**
+ * The `offset` / `bytesPerRow` / `rowsPerImage` triple, shared by copies and `writeTexture`.
+ *
+ * ⚠ **Absent is written explicitly, as `WGPU_COPY_STRIDE_UNDEFINED`, and must be.** The same C
+ * struct reaches this function down two paths that disagree about what a fresh buffer contains:
+ *
+ *   `queue.writeTexture` allocates it **top-level**, so `initStruct` applies the header's own
+ *   `WGPU_*_INIT` values and both strides already read `U32_UNDEFINED`.
+ *
+ *   A texel copy reaches it as a **sub-view** of `WGPUTexelCopyBufferInfo`, and `sub()` deliberately
+ *   does *not* apply those defaults — see `build.ts`, where the exclusion is load-bearing for
+ *   `WGPUBindGroupLayoutEntry`. So the field arrives as **zero**.
+ *
+ * Zero is not "unset" here; it is an invalid stride. Measured: a `copyTextureToBuffer` whose
+ * `rowsPerImage` reads 0 makes wgpu-native panic in `conv.rs:828` — `invalid rowsPerImage`,
+ * non-unwinding, exit 127, no catchable error and no JS stack — while Dawn rejects it as a
+ * validation error naming the value (`the height of each image in blocks (4) is > rowsPerImage (0)`)
+ * and copies nothing. Writing the sentinel makes both paths mean the same thing, and both
+ * implementations then accept the copy and return the correct pixels.
+ *
+ * ── What was here before ────────────────────────────────────────────────────────────────────────
+ *
+ * `packTexelCopyBufferInfo` used to materialise `rowsPerImage` from `copySize.height`, described as
+ * "the one deliberate exception to absent-stays-absent". The abort it was avoiding is real — this
+ * was re-measured, and removing the workaround without replacing it reproduces the panic exactly.
+ * But the diagnosis in the comment was one level off: the problem is not the field being absent, it
+ * is the sub-view representing absence as 0, and the fix belongs here rather than at one call site.
+ * Materialising a height also broke a case: for a multi-layer copy the spec *requires*
+ * `rowsPerImage`, and supplying `copySize.height` turned "you must state this" into a different
+ * request that validates.
+ */
 export function writeTexelCopyBufferLayout(
   view: CStructView<"WGPUTexelCopyBufferLayout">,
   layout: GPUTexelCopyBufferLayout,
 ): void {
   view.setU64("offset", BigInt(layout.offset ?? 0));
-  if (layout.bytesPerRow !== undefined) view.setU32("bytesPerRow", layout.bytesPerRow);
-  if (layout.rowsPerImage !== undefined) view.setU32("rowsPerImage", layout.rowsPerImage);
+  view.setU32("bytesPerRow", layout.bytesPerRow ?? U32_UNDEFINED);
+  view.setU32("rowsPerImage", layout.rowsPerImage ?? U32_UNDEFINED);
 }
 
 /** `WGPUTexelCopyTextureInfo` — the texture half of a copy. */

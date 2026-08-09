@@ -110,6 +110,19 @@ jobs:
           path: vendor
           if-no-files-found: error
 
+  # ── Dawn, linked here rather than downloaded. ─────────────────────────────────────────────────
+  #
+  # The same workflow that gates every push, called rather than copied: a release that linked Dawn
+  # by its own recipe would differ from the one CI exercises, and the difference would first be
+  # visible to whoever installed the published package. Each leg also runs the whole suite against
+  # what it just linked, so a Dawn package cannot be published from a library that does not work.
+  #
+  # Its artefacts (`webgpu-dawn-<rid>`) carry the library, its header and its version stamp, which is
+  # exactly what `release:stage --impl dawn` reads out of `vendor/<rid>/`.
+  dawn:
+    name: dawn
+    uses: ./.github/workflows/dawn-build.yml
+
   # ── Everything that can be checked without a GPU, on one runner, before anything is published. ─
   verify:
     name: verify
@@ -183,7 +196,7 @@ jobs:
   publish:
     name: publish to npm
     runs-on: ubuntu-latest # GitHub-hosted: trusted publishing does not work on self-hosted runners
-    needs: [shim, verify]
+    needs: [shim, verify, dawn]
     permissions:
       id-token: write # the OIDC token that replaces NPM_TOKEN
       contents: read
@@ -224,11 +237,27 @@ jobs:
           path: vendor
           merge-multiple: true
 
+      - name: Collect the linked Dawn libraries
+        # Built by the `dawn` job above, on three matching runners, and already proven there: each
+        # leg ran the whole suite against the library it linked before uploading it.
+        uses: actions/download-artifact@v4
+        with:
+          pattern: webgpu-dawn-*
+          path: vendor
+          merge-multiple: true
+
       - name: Stage the per-platform packages
         # One package per RID, carrying wgpu-native AND the shim. They ship together because a shim
         # transcribes one wgpu-native generation's struct layouts by hand and is only correct paired
         # with it.
         run: bun run release:stage
+
+      - name: Stage the Dawn platform packages
+        # Three more, `@wgpu-bun/<rid>-dawn`, each a single library with the shim linked in. They are
+        # staged into `dist/npm/` alongside the others and published by the same loop — but they are
+        # deliberately NOT wired into `optionalDependencies`, so nobody installs 10-20 MiB of Dawn
+        # they did not ask for. Preflight refuses any whose library does not export the fused shim.
+        run: bun run scripts/release-platform-packages.ts --impl dawn --check && bun run scripts/release-platform-packages.ts --impl dawn
 
       - name: Wire optionalDependencies into the root package
         # Written at release time rather than committed: until the platform packages exist on npm,

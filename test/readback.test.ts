@@ -178,4 +178,44 @@ describe.skipIf(skipGpu)("texture readback", () => {
     const lastRow = (H - 1) * bytesPerRow;
     expect(Math.abs(pixels[lastRow + 1]! - 128)).toBeLessThanOrEqual(1);
   });
+  test("a multi-layer copy that omits rowsPerImage is a validation error, not an abort", async () => {
+    // The strides are written as WGPU_COPY_STRIDE_UNDEFINED when absent, and this is what that buys.
+    //
+    // The same C struct arrives here as a *sub-view* of `WGPUTexelCopyBufferInfo`, where `sub()`
+    // deliberately does not apply the header's INIT defaults, so an untouched field reads **0** — and
+    // 0 is not "unset", it is an invalid stride. Before the sentinel was written explicitly,
+    // wgpu-native took a non-unwinding panic in `conv.rs:828` on exactly this shape: exit 127, no
+    // catchable error, and every remaining suite in the process gone with it.
+    //
+    // ⚠ Deliberately never submitted. The command buffer is invalid by construction, and submitting
+    // one of those is how a negative test takes the whole run down instead of reporting.
+    const d = await freshDevice("multi-layer-strides");
+    const W = 64;
+    const H = 4;
+    const layers = 2;
+    const bytesPerRow = 256;
+
+    const tex = d.createTexture({
+      size: [W, H, layers],
+      format: "rgba8unorm",
+      usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+    });
+    const readback = d.createBuffer({
+      size: bytesPerRow * H * layers,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+
+    const enc = d.createCommandEncoder();
+    d.pushErrorScope("validation");
+    // WebGPU *requires* rowsPerImage once the copy spans more than one layer. Omitting it must be
+    // reported as such — not filled in from `copySize.height`, which is a different request that
+    // validates, and not left at 0, which used to abort.
+    enc.copyTextureToBuffer({ texture: tex }, { buffer: readback, bytesPerRow }, [W, H, layers]);
+    enc.finish();
+    const error = await d.popErrorScope();
+
+    expect(error).toBeTruthy();
+    tex.destroy();
+    readback.destroy();
+  });
 });

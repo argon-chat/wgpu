@@ -16,13 +16,15 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  DAWN_LICENSE_FILE,
   optionalDependenciesFor,
   platformPackageManifest,
   SCOPE,
   UPSTREAM_LICENSE_FILE,
 } from "../scripts/release-platform-packages.ts";
 import { NPM_SCOPE } from "../src/index.ts";
-import { platformOf, supportedRids } from "../wgpu-native.manifest.ts";
+import { platformOf, supportedRids, type Rid } from "../wgpu-native.manifest.ts";
+import { dawnRids } from "../dawn.manifest.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(fs.readFileSync(path.join(PKG_ROOT, "package.json"), "utf-8")) as Record<string, any>;
@@ -163,6 +165,53 @@ describe("platform packages", () => {
     // Failing here before the file exists is the point: it is a release blocker, and
     // `bun run release:check` reports it as one.
     expect(fs.existsSync(path.join(PKG_ROOT, UPSTREAM_LICENSE_FILE))).toBe(true);
+  });
+
+  test.each(dawnRids())("%s produces a well-formed Dawn platform manifest", (rid: Rid) => {
+    const m = platformPackageManifest(rid, "1.2.3", null, "dawn");
+
+    // A separate package name, not a separate scope: one `optionalDependencies` block could name
+    // every platform of both if it ever needed to, and a missing Dawn install fails with a name
+    // that can be searched for.
+    expect(m["name"]).toBe(`${SCOPE}/${rid}-dawn`);
+    expect(m["os"]).toEqual([platformOf(rid)]);
+    expect(m["cpu"]).toEqual([rid.slice(rid.indexOf("-") + 1)]);
+
+    // Headers live under `include-dawn`, and the exports map has to name it. `src/resolve.ts`
+    // resolves this implementation's header directory by that name — one shared `include/` would
+    // have Dawn checked against wgpu-native's declarations, which is a check that cannot fail for
+    // the wrong reason.
+    const exports = m["exports"] as Record<string, string>;
+    expect(exports["./lib/*"]).toBe("./lib/*");
+    expect(exports["./include-dawn/*"]).toBe("./include-dawn/*");
+    expect(m["files"]).toContain("include-dawn");
+    expect(m["files"]).toContain(".dawn-version");
+
+    // ONE library. The shim is linked into it by `dawn:link`, so there is no second file and no
+    // `.shim-version`: the pair cannot be separated because it is not a pair.
+    expect(m["files"]).not.toContain(".shim-version");
+    expect(m["description"]).toContain("linked in");
+
+    // Dawn and Tint are BSD-3-Clause with Apache-2.0 components; the shim is MIT. Declaring
+    // wgpu-native's dual licence here would state terms the consumer is not actually accepting.
+    expect(m["license"]).toBe("BSD-3-Clause AND Apache-2.0 AND MIT");
+    expect(m["files"]).toContain(DAWN_LICENSE_FILE);
+  });
+
+  test("Dawn's licence text is committed, like wgpu-native's and for the same reason", () => {
+    // Google's archive holds exactly bin/, include/ and lib/ — no licence text — so this copy is the
+    // only one that reaches a consumer of `@wgpu-bun/<rid>-dawn`.
+    expect(fs.existsSync(path.join(PKG_ROOT, DAWN_LICENSE_FILE))).toBe(true);
+  });
+
+  test("Dawn packages are never wired into optionalDependencies", () => {
+    // The load-bearing asymmetry. An optionalDependency installs by default, and a consumer who
+    // never types WGPU_BUN_IMPL=dawn should not be downloading a second WebGPU implementation.
+    const declared = pkg["optionalDependencies"] as Record<string, string> | undefined;
+    for (const name of Object.keys(declared ?? {})) expect(name.endsWith("-dawn")).toBe(false);
+    for (const name of Object.keys(optionalDependenciesFor("1.2.3"))) {
+      expect(name.endsWith("-dawn")).toBe(false);
+    }
   });
 
   test("a platform manifest omits repository rather than guessing one", () => {

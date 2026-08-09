@@ -26,22 +26,37 @@
  *     bun run scripts/release-platform-packages.ts --check          # validate, build nothing
  *     bun run scripts/release-platform-packages.ts                  # stage every RID into dist/npm/
  *     bun run scripts/release-platform-packages.ts --rid linux-x64  # stage one
+ *     bun run scripts/release-platform-packages.ts --impl dawn      # the Dawn packages instead
  *     bun run scripts/release-platform-packages.ts --wire           # write optionalDependencies
  *
- * Staging a RID requires **two** libraries under `vendor/<rid>/lib/`: upstream's wgpu-native, from
- * `bun run fetch --rid <rid>`, and this project's ABI shim, from `bun run shim:build --rid <rid>`.
+ * Staging a wgpu-native RID requires **two** libraries under `vendor/<rid>/lib/`: upstream's
+ * wgpu-native, from `bun run fetch --rid <rid>`, and this project's ABI shim, from
+ * `bun run shim:build --rid <rid>`.
  *
  * Those two have different portability. wgpu-native cross-fetches happily — it is a file download,
  * so one machine can stage every platform. The shim is compiled here, and cross-linking a `cdylib`
  * for four targets from one host means four target toolchains; the release workflow instead builds
  * each on its matching runner and collects the artefacts. So a release does need four machines, for
  * exactly one of the two artefacts.
+ *
+ * ── Two implementations, two families of package ────────────────────────────────────────────────
+ *
+ * `@wgpu-bun/<rid>` carries wgpu-native plus the shim; `@wgpu-bun/<rid>-dawn` carries **one** file,
+ * because `dawn:link` fuses the same shim objects into the Dawn library itself. Three platforms
+ * rather than four — Google publishes no arm64 Linux build.
+ *
+ * The asymmetry that matters is in delivery, not in contents: **the Dawn packages are never wired
+ * into `optionalDependencies`.** An optional dependency installs by default, and a consumer who
+ * never types `WGPU_BUN_IMPL=dawn` should not be downloading a second WebGPU implementation. So
+ * `--wire` refuses `--impl dawn` outright rather than quietly doing something reasonable-looking.
  */
+import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  currentRid,
   libFileName,
   platformOf,
   supportedRids,
@@ -49,6 +64,9 @@ import {
   type Rid,
 } from "../wgpu-native.manifest.ts";
 import { SHIM_VERSION, shimFileNameFor, shimIsRequired } from "../shim.manifest.ts";
+import { DAWN_TAG, dawnLibFileName, dawnRids } from "../dawn.manifest.ts";
+import { npmPackageFor } from "../src/resolve.ts";
+import { isWgpuImpl, WGPU_IMPLS, type WgpuImpl } from "../src/impl.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(PKG_ROOT, "vendor");
@@ -57,9 +75,15 @@ const STAGE_DIR = path.join(PKG_ROOT, "dist", "npm");
 /** npm scope the per-platform packages live under. Must match `NPM_SCOPE` in `src/resolve.ts`. */
 export const SCOPE = "@wgpu-bun";
 
-/** Package name for a RID: `@wgpu-bun/win32-x64`. The RID *is* the package name — no translation. */
-export function platformPackageName(rid: Rid): string {
-  return `${SCOPE}/${rid}`;
+/**
+ * Package name for a RID: `@wgpu-bun/win32-x64`, or `@wgpu-bun/win32-x64-dawn`.
+ *
+ * Delegated to the resolver rather than spelled again here. This name is a contract between two
+ * pieces of code that never meet — the publisher and `import.meta.resolve` at runtime — and the only
+ * way to be sure they agree is for there to be one function.
+ */
+export function platformPackageName(rid: Rid, impl: WgpuImpl = "wgpu-native"): string {
+  return npmPackageFor(rid, impl);
 }
 
 /** The `cpu` half of a RID, in npm's spelling (which is Node's, which is why RIDs use it). */
@@ -85,6 +109,77 @@ export function cpuOf(rid: Rid): string {
 export const UPSTREAM_LICENSE_FILE = "LICENSE-WGPU-NATIVE";
 
 /**
+ * Dawn's terms, under the same rule and for the same reason.
+ *
+ * Google's release archive holds exactly `bin/`, `include/` and `lib/` — no licence text either — so
+ * a package shipping `webgpu_dawn` without this redistributes BSD-3-Clause bytes bare. Copied
+ * verbatim from the Dawn repository at {@link DAWN_COMMIT}; the file is upstream's own, sectioned by
+ * `Files:` globs, and is committed rather than generated for the same reason as wgpu-native's.
+ *
+ * ⚠ It covers Dawn and Tint. The linked library also contains vendored third parties — abseil,
+ * SPIRV-Tools and others — whose notices live in their own `third_party/` subtrees upstream and
+ * cannot be enumerated from a binary here. The platform README says so and points at the tree rather
+ * than implying this one file is the whole picture.
+ */
+export const DAWN_LICENSE_FILE = "LICENSE-DAWN";
+
+/**
+ * Everything that differs between the two implementations when packaging them.
+ *
+ * A table rather than branches at each site: the failure this guards against is a partial edit —
+ * remembering the library name and forgetting the version stamp, or the include directory, or the
+ * licence — which produces a package that installs and then cannot be resolved at runtime.
+ */
+interface IImplPackaging {
+  readonly impl: WgpuImpl;
+  /** Platforms this implementation is published for. */
+  readonly rids: () => Rid[];
+  /** Loadable library inside `vendor/<rid>/lib`, and inside the package. */
+  readonly libFile: (platform: string) => string;
+  /**
+   * Further libraries that must travel in the same tarball.
+   *
+   * wgpu-native ships the ABI shim beside it; under Dawn the same objects are linked *into* the
+   * library, so the list is empty by construction rather than by omission.
+   */
+  readonly extraLibs: (rid: Rid) => readonly string[];
+  /** Version stamps copied from `vendor/<rid>` — the resolver reads these back. */
+  readonly stamps: readonly string[];
+  /** Sibling directory holding this implementation's headers. Must match `ILibraryKind` in resolve.ts. */
+  readonly includeDirName: string;
+  /** Upstream licence text, committed at the package root. */
+  readonly licenseFile: string;
+  /** What the upstream revision is called, for descriptions and READMEs. */
+  readonly upstreamTag: string;
+  readonly upstreamName: string;
+}
+
+const PACKAGING: Readonly<Record<WgpuImpl, IImplPackaging>> = {
+  "wgpu-native": {
+    impl: "wgpu-native",
+    rids: supportedRids,
+    libFile: libFileName,
+    extraLibs: (rid) => [shimFileNameFor(rid)],
+    stamps: [".version", ".shim-version"],
+    includeDirName: "include",
+    licenseFile: UPSTREAM_LICENSE_FILE,
+    upstreamTag: WGPU_NATIVE_TAG,
+    upstreamName: "wgpu-native",
+  },
+  dawn: {
+    impl: "dawn",
+    rids: dawnRids,
+    libFile: dawnLibFileName,
+    extraLibs: () => [],
+    stamps: [".dawn-version"],
+    includeDirName: "include-dawn",
+    licenseFile: DAWN_LICENSE_FILE,
+    upstreamTag: DAWN_TAG,
+    upstreamName: "Dawn",
+  },
+};
+
+/**
  * The `package.json` of one platform package.
  *
  * The `exports` map is load-bearing and easy to omit. `src/resolve.ts` locates the library with
@@ -96,29 +191,41 @@ export function platformPackageManifest(
   rid: Rid,
   version: string,
   repositoryUrl: string | null,
+  impl: WgpuImpl = "wgpu-native",
 ): Record<string, unknown> {
   const platform = platformOf(rid);
+  const p = PACKAGING[impl];
   const manifest: Record<string, unknown> = {
-    name: platformPackageName(rid),
+    name: platformPackageName(rid, impl),
     version,
-    description: `wgpu-native ${WGPU_NATIVE_TAG} and the wgpu-bun ABI shim ${SHIM_VERSION} for ${rid}. Installed automatically by wgpu-bun.`,
-    // The package is almost entirely someone else's binary, so the SPDX expression is wgpu-native's
-    // dual licence, not this repository's. Declaring MIT alone would understate the terms a consumer
-    // is actually accepting.
-    license: "MIT OR Apache-2.0",
+    description:
+      impl === "dawn"
+        ? `Dawn ${DAWN_TAG} with the wgpu-bun ABI shim ${SHIM_VERSION} linked in, for ${rid}. Opt-in; select it with WGPU_BUN_IMPL=dawn.`
+        : `wgpu-native ${WGPU_NATIVE_TAG} and the wgpu-bun ABI shim ${SHIM_VERSION} for ${rid}. Installed automatically by wgpu-bun.`,
+    // The package is almost entirely someone else's binary, so the SPDX expression is the upstream
+    // project's, not this repository's. Declaring MIT alone would understate the terms a consumer is
+    // actually accepting. Dawn's linked library is BSD-3-Clause with Apache-2.0 components.
+    license: impl === "dawn" ? "BSD-3-Clause AND Apache-2.0 AND MIT" : "MIT OR Apache-2.0",
     os: [platform],
     cpu: [cpuOf(rid)],
     exports: {
       "./lib/*": "./lib/*",
-      "./include/*": "./include/*",
+      [`./${p.includeDirName}/*`]: `./${p.includeDirName}/*`,
       "./package.json": "./package.json",
     },
-    files: ["lib", "include", ".version", ".shim-version", "README.md", UPSTREAM_LICENSE_FILE],
+    files: ["lib", p.includeDirName, ...p.stamps, "README.md", p.licenseFile],
   };
   // Never fabricated: an incorrect `repository.url` breaks npm trusted publishing with an
   // authorization error that names nothing useful, so absent is strictly better than guessed.
-  if (repositoryUrl) manifest["repository"] = { type: "git", url: repositoryUrl, directory: `dist/npm/${rid}` };
+  if (repositoryUrl) {
+    manifest["repository"] = { type: "git", url: repositoryUrl, directory: `dist/npm/${stageDirName(rid, impl)}` };
+  }
   return manifest;
+}
+
+/** Staging directory for a package — the RID, plus the implementation when it is not the default. */
+function stageDirName(rid: Rid, impl: WgpuImpl): string {
+  return impl === "dawn" ? `${rid}-dawn` : rid;
 }
 
 /** The `optionalDependencies` block the root package.json carries once the platforms are published. */
@@ -129,7 +236,8 @@ export function optionalDependenciesFor(version: string, rids: Rid[] = supported
 }
 
 /** Human-readable README shipped inside each platform package. */
-function platformReadme(rid: Rid): string {
+function platformReadme(rid: Rid, impl: WgpuImpl = "wgpu-native"): string {
+  if (impl === "dawn") return dawnPlatformReadme(rid);
   return [
     `# ${platformPackageName(rid)}`,
     "",
@@ -152,69 +260,159 @@ function platformReadme(rid: Rid): string {
   ].join("\n");
 }
 
+/** README for a Dawn platform package — one library, opt-in, and the parts a consumer must supply. */
+function dawnPlatformReadme(rid: Rid): string {
+  const lib = dawnLibFileName(platformOf(rid));
+  const lines = [
+    `# ${platformPackageName(rid, "dawn")}`,
+    "",
+    `One shared library for \`${rid}\`: \`lib/${lib}\`.`,
+    "",
+    `It is [Dawn](https://dawn.googlesource.com/dawn) \`${DAWN_TAG}\` — Chromium's WebGPU — **linked`,
+    "from upstream's static release** by the `wgpu-bun` repository, with the `wgpu-bun` ABI shim",
+    `\`${SHIM_VERSION}\` linked into the same binary. Google publishes Dawn as static archives only,`,
+    "so there is nothing to `dlopen` until someone links it; the build is a public CI run pinned by a",
+    "git tag and a sha256, both recorded in `dawn.manifest.ts`.",
+    "",
+    "Dawn and Tint are BSD-3-Clause with Apache-2.0 components — see `LICENSE-DAWN`, copied verbatim",
+    "from upstream. The library also statically contains vendored third parties (abseil, SPIRV-Tools",
+    "and others) whose notices live in Dawn's own `third_party/` tree; they cannot be enumerated from",
+    "a binary, so that tree is the reference rather than this file. The shim is MIT.",
+    "",
+    "## This one is opt-in",
+    "",
+    "Unlike the wgpu-native platform packages, this is **not** an `optionalDependency` of `wgpu-bun`.",
+    "Install it deliberately, and select it at runtime:",
+    "",
+    "```sh",
+    `bun add ${platformPackageName(rid, "dawn")}`,
+    "WGPU_BUN_IMPL=dawn bun run your-thing.ts",
+    "```",
+  ];
+  if (platformOf(rid) === "win32") {
+    lines.push(
+      "",
+      "## Windows needs one runtime dependency, and it is not in this package",
+      "",
+      "Dawn loads its backend's support library dynamically: **DXC** (`dxcompiler.dll` + `dxil.dll`,",
+      "from the Windows SDK) for D3D12, or the **Vulkan loader** (`vulkan-1.dll`, installed with every",
+      "GPU driver) for Vulkan. `wgpu-bun` finds whichever is present and preloads it, and defaults to",
+      "the backend that can run.",
+      "",
+      "Neither is shipped here on purpose: `dxil.dll` is closed-source Microsoft code, and",
+      "`vulkan-1.dll` belongs to your driver installation. A machine with neither gets an error naming",
+      "both rather than a Win32 error number.",
+    );
+  }
+  lines.push("");
+  return lines.join("\n");
+}
+
 // ── staging ─────────────────────────────────────────────────────────────────────────────────────
 
 interface IStageResult {
   readonly rid: Rid;
   readonly staged: boolean;
   readonly reason?: string;
+  /** Package name, so the caller reports what it actually produced rather than reconstructing it. */
+  readonly name?: string;
 }
 
-function stage(rid: Rid, version: string, repositoryUrl: string | null): IStageResult {
+function stage(
+  rid: Rid,
+  version: string,
+  repositoryUrl: string | null,
+  impl: WgpuImpl = "wgpu-native",
+): IStageResult {
+  const p = PACKAGING[impl];
   const srcDir = path.join(VENDOR_DIR, rid);
-  const libName = libFileName(platformOf(rid));
-  const srcLib = path.join(srcDir, "lib", libName);
-  if (!fs.existsSync(srcLib)) {
-    return { rid, staged: false, reason: `vendor/${rid}/lib/${libName} is missing — run: bun run fetch --rid ${rid}` };
-  }
+  const name = platformPackageName(rid, impl);
 
-  // The ABI shim rides in the SAME package as wgpu-native, not in one of its own. That is what makes
-  // the two impossible to separate: a shim transcribes one wgpu-native generation's struct layouts,
-  // so a consumer who ended up with a shim from one release and a library from another would hit
-  // version skew — which the seam does refuse at load, but refusing is worse than never being able
-  // to get there. One tarball, one version, one `os`/`cpu` match.
-  const shimName = shimFileNameFor(rid);
-  const srcShim = path.join(srcDir, "lib", shimName);
-  if (!fs.existsSync(srcShim)) {
-    return {
-      rid,
-      staged: false,
-      reason: `vendor/${rid}/lib/${shimName} is missing — run: bun run shim:build --rid ${rid} (or shim:fetch)`,
-    };
-  }
-
-  const outDir = path.join(STAGE_DIR, rid);
-  fs.rmSync(outDir, { recursive: true, force: true });
-  fs.mkdirSync(path.join(outDir, "lib"), { recursive: true });
-  fs.mkdirSync(path.join(outDir, "include"), { recursive: true });
-
-  fs.copyFileSync(srcLib, path.join(outDir, "lib", libName));
-  fs.copyFileSync(srcShim, path.join(outDir, "lib", shimName));
-  const shimStamp = path.join(srcDir, ".shim-version");
-  if (fs.existsSync(shimStamp)) fs.copyFileSync(shimStamp, path.join(outDir, ".shim-version"));
-  const incDir = path.join(srcDir, "include");
-  if (fs.existsSync(incDir)) {
-    for (const header of fs.readdirSync(incDir)) {
-      fs.copyFileSync(path.join(incDir, header), path.join(outDir, "include", header));
+  // Every file the package needs, resolved before anything is written. A staging run that copies
+  // half a package and then fails leaves `dist/npm` looking publishable, which is the one outcome
+  // worth engineering against here.
+  const libName = p.libFile(platformOf(rid));
+  const required = [libName, ...p.extraLibs(rid)];
+  for (const file of required) {
+    if (!fs.existsSync(path.join(srcDir, "lib", file))) {
+      return { rid, staged: false, reason: `vendor/${rid}/lib/${file} is missing — ${howToGet(rid, impl, file)}` };
     }
   }
-  const stamp = path.join(srcDir, ".version");
-  fs.copyFileSync(fs.existsSync(stamp) ? stamp : path.join(srcDir, ".version"), path.join(outDir, ".version"));
 
-  // Upstream ships no licence text in its archives, so this is the only copy that reaches a
-  // consumer. Staging without it would publish someone else's binary with no terms attached.
-  const license = path.join(PKG_ROOT, UPSTREAM_LICENSE_FILE);
+  const license = path.join(PKG_ROOT, p.licenseFile);
   if (!fs.existsSync(license)) {
-    return { rid, staged: false, reason: `${UPSTREAM_LICENSE_FILE} is missing from the package root` };
+    // Upstream ships no licence text in its archives — neither project does — so this is the only
+    // copy that reaches a consumer. Staging without it would publish someone else's binary bare.
+    return { rid, staged: false, reason: `${p.licenseFile} is missing from the package root` };
   }
-  fs.copyFileSync(license, path.join(outDir, UPSTREAM_LICENSE_FILE));
 
+  const outDir = path.join(STAGE_DIR, stageDirName(rid, impl));
+  fs.rmSync(outDir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(outDir, "lib"), { recursive: true });
+  fs.mkdirSync(path.join(outDir, p.includeDirName), { recursive: true });
+
+  for (const file of required) {
+    fs.copyFileSync(path.join(srcDir, "lib", file), path.join(outDir, "lib", file));
+  }
+
+  // Stamps are what `src/resolve.ts` reads back as the installed version, so a missing one is not
+  // cosmetic: it turns a known revision into `null`. The wgpu-native `.version` is required; the
+  // rest are copied when present, because the shim has none when it was fetched rather than built.
+  for (const stamp of p.stamps) {
+    const src = path.join(srcDir, stamp);
+    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(outDir, stamp));
+    else if (stamp === p.stamps[0]) {
+      return { rid, staged: false, reason: `vendor/${rid}/${stamp} is missing — the revision would ship unrecorded` };
+    }
+  }
+
+  const incDir = path.join(srcDir, p.includeDirName);
+  if (fs.existsSync(incDir)) {
+    for (const header of fs.readdirSync(incDir)) {
+      fs.copyFileSync(path.join(incDir, header), path.join(outDir, p.includeDirName, header));
+    }
+  }
+
+  fs.copyFileSync(license, path.join(outDir, p.licenseFile));
   fs.writeFileSync(
     path.join(outDir, "package.json"),
-    `${JSON.stringify(platformPackageManifest(rid, version, repositoryUrl), null, 2)}\n`,
+    `${JSON.stringify(platformPackageManifest(rid, version, repositoryUrl, impl), null, 2)}
+`,
   );
-  fs.writeFileSync(path.join(outDir, "README.md"), platformReadme(rid));
-  return { rid, staged: true };
+  fs.writeFileSync(path.join(outDir, "README.md"), platformReadme(rid, impl));
+  return { rid, staged: true, name };
+}
+
+/** The command that produces a missing input, named exactly rather than left to be guessed. */
+function howToGet(rid: Rid, impl: WgpuImpl, file: string): string {
+  if (impl === "dawn") return `run: bun run dawn:fetch --rid ${rid} && bun run dawn:link --rid ${rid}`;
+  if (file.includes("shim")) return `run: bun run shim:build --rid ${rid} (or shim:fetch)`;
+  return `run: bun run fetch --rid ${rid}`;
+}
+
+/**
+ * Does this linked Dawn library actually carry the fused ABI shim?
+ *
+ * Asked by opening it and looking for one trampoline, because the alternative — trusting that
+ * `dawn:link` ran — is exactly the assumption that produces a package which installs, loads, and
+ * then cannot make a single by-value call. The symbol is never *called* here; `dlopen` throws when a
+ * declared name is absent, which is the whole test.
+ *
+ * ⚠ Only meaningful for the host's own RID. A cross-staged library is a different architecture and
+ * cannot be opened at all, so that case is reported as unknown rather than as a failure — checking
+ * it belongs to the leg that built it, where `dawn:link` already verifies all 15 by symbol table.
+ */
+function dawnLibraryCarriesShim(libPath: string): boolean {
+  if (platformOf(currentRid()) !== process.platform) return true;
+  try {
+    dlopen(libPath, { wgpu_bun_shim_abi_version: { args: [], returns: FFIType.u32 } });
+    return true;
+  } catch (err) {
+    const message = (err as Error).message ?? "";
+    if (/not found/i.test(message)) return false;
+    // Would not load at all — a different failure, and one the missing-library check above reports.
+    return true;
+  }
 }
 
 // ── CLI ─────────────────────────────────────────────────────────────────────────────────────────
@@ -229,12 +427,31 @@ function main(argv: string[]): void {
   const version = rootPkg.version;
   const repositoryUrl = rootPkg.repository?.url ?? null;
 
+  const implArg = argv.indexOf("--impl") !== -1 ? argv[argv.indexOf("--impl") + 1] : null;
+  if (implArg && !isWgpuImpl(implArg)) {
+    console.error(`unknown --impl "${implArg}". Known: ${WGPU_IMPLS.join(", ")}.`);
+    process.exit(1);
+  }
+  const impl: WgpuImpl = (implArg as WgpuImpl | null) ?? "wgpu-native";
+  const packaging = PACKAGING[impl];
+
   const only = argv.indexOf("--rid") !== -1 ? argv[argv.indexOf("--rid") + 1] : null;
-  const rids = only ? [only] : supportedRids();
+  const rids = only ? [only as Rid] : packaging.rids();
 
   if (argv.includes("--wire")) {
     // Writing the block is a release action, not a repo default. Until the platform packages exist
     // on npm, declaring them would mean every `bun install` tries to resolve four 404s.
+    if (impl === "dawn") {
+      // Deliberate, and the whole reason Dawn has a package name of its own. An `optionalDependency`
+      // installs by default, and Dawn is a 10-20 MiB library most consumers will never select — plus
+      // on Windows it needs a runtime dependency this repository does not ship. Opt-in means the
+      // consumer types the name.
+      console.error(
+        "--wire is for wgpu-native only. Dawn platform packages are opt-in and must not appear " +
+          "in optionalDependencies: they would install for everyone, by default, unused.",
+      );
+      process.exit(1);
+    }
     const next = { ...rootPkg, optionalDependencies: optionalDependenciesFor(version, rids) };
     fs.writeFileSync(rootPkgPath, `${JSON.stringify(next, null, 2)}\n`);
     console.log(`wired optionalDependencies for ${rids.length} platform(s) at ${version}`);
@@ -264,19 +481,36 @@ function main(argv: string[]): void {
   }
 
   if (argv.includes("--check")) {
-    if (!fs.existsSync(path.join(PKG_ROOT, UPSTREAM_LICENSE_FILE))) {
+    if (!fs.existsSync(path.join(PKG_ROOT, packaging.licenseFile))) {
       problems.push(
-        `${UPSTREAM_LICENSE_FILE} is missing from the package root.\n` +
-          "  wgpu-native's release archives contain no licence text — only include/, lib/ and\n" +
-          "  wgpu-native-meta/ — so redistributing the shared library without it ships MIT /\n" +
-          "  Apache-2.0 bytes with no accompanying terms.\n" +
-          "  Copy the licence verbatim from the wgpu-native repository at the pinned tag. It is not\n" +
+        `${packaging.licenseFile} is missing from the package root.\n` +
+          `  ${packaging.upstreamName}'s release archives carry no licence text, so redistributing the\n` +
+          "  shared library without it ships someone else's bytes with no accompanying terms.\n" +
+          "  Copy the licence verbatim from the upstream repository at the pinned revision. It is not\n" +
           "  generated on purpose: a synthesised licence would mean an invented copyright line.",
       );
     }
     for (const rid of rids) {
-      const libPath = path.join(VENDOR_DIR, rid, "lib", libFileName(platformOf(rid)));
-      if (!fs.existsSync(libPath)) problems.push(`${rid}: not fetched (bun run fetch --rid ${rid})`);
+      const libPath = path.join(VENDOR_DIR, rid, "lib", packaging.libFile(platformOf(rid)));
+      if (!fs.existsSync(libPath)) {
+        problems.push(
+          impl === "dawn"
+            ? `${rid}: not linked (bun run dawn:fetch --rid ${rid} && bun run dawn:link --rid ${rid})`
+            : `${rid}: not fetched (bun run fetch --rid ${rid})`,
+        );
+      }
+      if (impl === "dawn") {
+        // The fused shim is what makes a Dawn package usable at all, and it is invisible in a
+        // directory listing — the package is one file either way. Checked by symbol, not by presence.
+        if (fs.existsSync(libPath) && !dawnLibraryCarriesShim(libPath)) {
+          problems.push(
+            `${rid}: the linked Dawn library does not export the ABI shim.\n` +
+              "    Such a package loads and then cannot make a single by-value call. Re-run\n" +
+              "    bun run dawn:link, which fuses the trampolines in and verifies them.",
+          );
+        }
+        continue;
+      }
       const shimPath = path.join(VENDOR_DIR, rid, "lib", shimFileNameFor(rid));
       if (!fs.existsSync(shimPath)) {
         // A release without the shim is not a partial release. On a SysV host the package simply
@@ -304,10 +538,11 @@ function main(argv: string[]): void {
   }
 
   fs.mkdirSync(STAGE_DIR, { recursive: true });
-  const results = rids.map((rid) => stage(rid, version, repositoryUrl));
+  const results = rids.map((rid) => stage(rid, version, repositoryUrl, impl));
   for (const r of results) {
-    if (r.staged) console.log(`ok    ${platformPackageName(r.rid)} → dist/npm/${r.rid}`);
-    else console.warn(`skip  ${platformPackageName(r.rid)}: ${r.reason}`);
+    const dir = stageDirName(r.rid, impl);
+    if (r.staged) console.log(`ok    ${platformPackageName(r.rid, impl)} → dist/npm/${dir}`);
+    else console.warn(`skip  ${platformPackageName(r.rid, impl)}: ${r.reason}`);
   }
   const staged = results.filter((r) => r.staged).length;
   if (staged === 0) {

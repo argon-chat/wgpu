@@ -73,6 +73,10 @@ on:
   pull_request:
     paths: *dawn_paths
   workflow_dispatch:
+  # Called by `release.yml`, so a release links Dawn with **this** recipe rather than a copy of it.
+  # The alternative — duplicating the three legs there — is how the release build and the tested
+  # build drift apart, and the drift is invisible until someone installs the published package.
+  workflow_call:
 
 permissions:
   contents: read
@@ -167,11 +171,19 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: webgpu-dawn-${{ matrix.rid }}
-          # The loadable library and nothing else. A `*webgpu_dawn*` glob also sweeps up the
-          # generated `.def` and MSVC's `.exp`/import `.lib` — build inputs and byproducts that are
-          # of no use to a consumer and would travel in the platform package looking like product.
+          # Exactly what a platform package needs, and nothing else. A `*webgpu_dawn*` glob would also
+          # sweep up the generated `.def` and MSVC's `.exp`/import `.lib` — build inputs and
+          # byproducts of no use to a consumer, which would then travel looking like product.
+          #
+          # ⚠ The paths start `vendor/*/` rather than `vendor/${{ matrix.rid }}/` **on purpose**. The
+          # artefact root is the longest literal prefix before a wildcard, so this keeps the RID
+          # directory inside the artefact; naming the RID literally would make the root
+          # `vendor/<rid>` and a `merge-multiple: true` download in `release.yml` would then flatten
+          # three platforms' libraries into one folder, two of them silently losing.
           path: |
-            vendor/${{ matrix.rid }}/lib/webgpu_dawn.dll
-            vendor/${{ matrix.rid }}/lib/libwebgpu_dawn.so
-            vendor/${{ matrix.rid }}/lib/libwebgpu_dawn.dylib
+            vendor/*/lib/webgpu_dawn.dll
+            vendor/*/lib/libwebgpu_dawn.so
+            vendor/*/lib/libwebgpu_dawn.dylib
+            vendor/*/include-dawn/*
+            vendor/*/.dawn-version
           if-no-files-found: error
