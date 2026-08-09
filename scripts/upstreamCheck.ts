@@ -31,13 +31,13 @@ import {
   type IUpstream,
 } from "../upstream.manifest.ts";
 
-interface IVersion {
+export interface IVersion {
   readonly tag: string;
   readonly parts: readonly number[];
 }
 
 /** `v29.0.1.1` → [29,0,1,1]; `v20260807.193620` → [20260807,193620]. Null if not a numeric tag. */
-function parseTag(tag: string): IVersion | null {
+export function parseTag(tag: string): IVersion | null {
   const trimmed = tag.trim();
   if (!/^v\d+(\.\d+)*$/.test(trimmed)) return null;
   const parts = trimmed.slice(1).split(".").map(Number);
@@ -105,7 +105,7 @@ export interface IUpstreamEvent {
   readonly compareUrl: string | null;
 }
 
-function evaluate(u: IUpstream, tags: readonly IVersion[]): IUpstreamEvent {
+export function evaluate(u: IUpstream, tags: readonly IVersion[]): IUpstreamEvent {
   const latest = tags.reduce((a, b) => (compare(a, b) >= 0 ? a : b));
   const base = {
     id: u.id,

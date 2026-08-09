@@ -35,6 +35,7 @@ import { fileURLToPath } from "node:url";
 
 import { currentRid, platformOf, type Rid } from "../wgpu-native.manifest.ts";
 import { displace } from "./displace.ts";
+import { buildShimCrate } from "./shimBuild.ts";
 import {
   SHIM_ASSETS,
   SHIM_RELEASE_TAG,
@@ -87,42 +88,17 @@ function install(rid: Rid, bytesOrPath: Uint8Array | string): void {
 
 // ── build ───────────────────────────────────────────────────────────────────────────────────────
 
-async function build(rid: Rid): Promise<void> {
-  const target = rustTargetFor(rid);
-  if (!target) {
-    fail(
-      `no Rust target is mapped for RID "${rid}".\n` +
-        `       known: ${shimRids().join(", ")}\n` +
-        `       Add one to rustTargetFor() in shim.manifest.ts if this is a platform worth supporting.`,
-    );
+function build(rid: Rid): void {
+  // The cargo invocation itself lives in `shimBuild.ts`, because `dawn-link.ts` needs the same
+  // build to obtain the static archive it fuses in. One build, both artefacts; this path installs
+  // the loadable one and ignores the other.
+  let artifacts;
+  try {
+    artifacts = buildShimCrate(rid, { onCommand: (c) => info(`${rid}: ${c}`) });
+  } catch (e) {
+    fail(`${rid}: ${e instanceof Error ? e.message : String(e)}`);
   }
-
-  const hostTarget = rustTargetFor(currentRid());
-  const args = ["cargo", "build", "--release", "--target", target];
-  info(`${rid}: ${args.join(" ")}`);
-  if (target !== hostTarget) {
-    // Cross-compiling a `cdylib` needs a linker for the target, which cargo does not supply. Saying
-    // so before the failure is cheaper than a linker error nobody reads.
-    warn(
-      `${rid}: cross-building from ${currentRid()}. This needs \`rustup target add ${target}\` and a ` +
-        `linker for that target; CI builds each RID on its own runner precisely to avoid this.`,
-    );
-  }
-
-  const proc = Bun.spawn(args, { cwd: SHIM_CRATE, stdout: "inherit", stderr: "inherit" });
-  const code = await proc.exited;
-  if (code !== 0) fail(`${rid}: cargo build exited ${code}`);
-
-  // cargo names a cdylib exactly as the platform does, so the manifest's file name is also the
-  // artefact's name — no translation table, nothing to keep in sync.
-  const built = path.join(SHIM_CRATE, "target", target, "release", shimFileNameFor(rid));
-  if (!fs.existsSync(built)) {
-    fail(
-      `${rid}: cargo reported success but ${path.relative(PKG_ROOT, built)} does not exist.\n` +
-        `       That usually means the crate-type is not \`cdylib\`, or the target directory moved.`,
-    );
-  }
-  install(rid, built);
+  install(rid, artifacts.cdylib);
 }
 
 // ── fetch ───────────────────────────────────────────────────────────────────────────────────────
@@ -229,7 +205,7 @@ try {
   if (argv.includes("--update-hashes")) await updateHashes();
   else if (argv.includes("--check")) check(all ? shimRids() : rids);
   else if (argv.includes("--fetch")) for (const rid of rids) await fetchOne(rid);
-  else if (argv.includes("--build")) for (const rid of rids) await build(rid);
+  else if (argv.includes("--build")) for (const rid of rids) build(rid);
   else {
     fail(
       "pick one of --build, --fetch, --check or --update-hashes.\n" +

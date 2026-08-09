@@ -46,7 +46,10 @@ import {
   dawnLibFileName,
   dawnRids,
 } from "../dawn.manifest.ts";
+import { SHIM_EXPORTS } from "../src/ffi/abiSeam.ts";
 import { findAllByBasename, findApiHeader } from "./dawnHeaders.ts";
+import { elfVersionScript, machOExportsList, windowsDefFile } from "./exportFilters.ts";
+import { buildShimCrate } from "./shimBuild.ts";
 import { displace } from "./displace.ts";
 import { wgpuSymbolsIn } from "./symbolTable.ts";
 
@@ -132,14 +135,25 @@ function run(cmd: string, args: string[], cwd: string, env: Record<string, strin
 interface ILinkInputs {
   readonly rid: Rid;
   readonly staticLib: string;
+  /**
+   * The ABI shim's static archive, fused into the same library.
+   *
+   * A Dawn install is then one file that carries the C API *and* the trampolines `bun:ffi` needs for
+   * the by-value aggregates it cannot express. The shim's own `open(path)` is unchanged by this: it
+   * is handed the path of the library it should resolve against, and on this build that is the
+   * library it already lives in — `LoadLibraryW`/`dlopen` of an already-loaded module returns the
+   * same handle, so the trampolines find Dawn's `wgpu*` next to themselves.
+   */
+  readonly shimLib: string;
   readonly header: string;
   /**
-   * The C API names, parsed from {@link header} once in `main`.
+   * Everything the library must export: Dawn's C API, parsed from {@link header} once in `main`,
+   * followed by the shim's flat surface.
    *
-   * Once, and in one place, because the guard that they are plausible has to cover every platform.
-   * It used to live inside the Windows path only, so when the header probe returned a decoy the
-   * Windows leg failed with "the header shape changed" and the macOS leg wrote an empty export list
-   * and linked a library that exported nothing.
+   * Parsed once, and in one place, because the guard that the names are plausible has to cover every
+   * platform. It used to live inside the Windows path only, so when the header probe returned a
+   * decoy the Windows leg failed with "the header shape changed" and the macOS leg wrote an empty
+   * export list and linked a library that exported nothing.
    */
   readonly exports: readonly string[];
   readonly outDir: string;
@@ -205,18 +219,18 @@ function runInMsvcEnv(cmd: string, args: string[], cwd: string): void {
   const script = path.join(cwd, "_link.bat");
   const quoted = args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
   fs.writeFileSync(script, `@echo off\r\ncall "${vcvarsPath()}" >nul\r\n${cmd} ${quoted}\r\nexit /b %ERRORLEVEL%\r\n`);
-  try {
-    const r = spawnSync("cmd", ["/c", script], { cwd, stdio: "inherit", shell: false });
-    if (r.error) fail(`cmd: ${r.error.message}`);
-    if (r.status !== 0) fail(`${cmd} exited ${r.status}`);
-  } finally {
-    fs.rmSync(script, { force: true });
-  }
+  const r = spawnSync("cmd", ["/c", script], { cwd, stdio: "inherit", shell: false });
+  // Removed before the status is judged, not in a `finally`: `fail` exits the process, and
+  // `process.exit` does not unwind — a `finally` here would leave the batch behind on exactly the
+  // runs that fail, in the output directory, where it then looks like part of the product.
+  fs.rmSync(script, { force: true });
+  if (r.error) fail(`cmd: ${r.error.message}`);
+  if (r.status !== 0) fail(`${cmd} exited ${r.status}`);
 }
 
 function linkWindows(io: ILinkInputs): void {
   const defPath = path.join(io.outDir, "webgpu_dawn.def");
-  fs.writeFileSync(defPath, `EXPORTS\n${io.exports.map((n) => `    ${n}`).join("\n")}\n`);
+  fs.writeFileSync(defPath, windowsDefFile(io.exports));
   info(`${io.rid}: ${io.exports.length} exports → ${path.basename(defPath)}`);
 
   // System libraries per Dawn's own installed `DawnTargets.cmake`. Notably absent: d3d12/dxgi/dxc —
@@ -230,6 +244,10 @@ function linkWindows(io: ILinkInputs): void {
       `/OUT:${io.outLib}`,
       "/OPT:REF", "/OPT:ICF",
       io.staticLib,
+      // The shim, fused. No `/WHOLEARCHIVE`: every name in the `.def` is a symbol the linker must
+      // resolve, so listing the trampolines there is already what pulls their object out of this
+      // archive — and only that object, instead of all of Rust's std.
+      io.shimLib,
       "user32.lib", "onecore_apiset.lib", "dxguid.lib",
       "ole32.lib", "oleaut32.lib", "advapi32.lib", "kernel32.lib",
       "shell32.lib", "shlwapi.lib", "version.lib", "propsys.lib",
@@ -244,13 +262,20 @@ function linkLinux(io: ILinkInputs): void {
   // the WebGPU C API. Without the version script this also exports Dawn's vendored tint, abseil and
   // SPIRV-Tools symbols — hundreds of thousands of them — into the global namespace.
   const versionScript = path.join(io.outDir, "webgpu_dawn.map");
-  fs.writeFileSync(versionScript, "{ global: wgpu*; local: *; };\n");
+  fs.writeFileSync(versionScript, elfVersionScript());
   run(
     "c++",
     [
       "-shared", "-fPIC",
       "-o", io.outLib,
       "-Wl,--whole-archive", io.staticLib, "-Wl,--no-whole-archive",
+      // The shim, fused. `-u` and not `--whole-archive`: nothing in Dawn references the trampolines,
+      // so without a forced reference their object is never pulled out of the archive and the
+      // version script then exports a pattern that matches nothing — silently, because an ELF
+      // version script does not fail on an unmatched glob. Whole-archiving instead would drag in all
+      // of Rust's std for fifteen functions.
+      ...SHIM_EXPORTS.map((n) => `-Wl,-u,${n}`),
+      io.shimLib,
       `-Wl,--version-script=${versionScript}`,
       "-Wl,--as-needed",
       "-ldl", "-lpthread", "-lrt", "-lm",
@@ -264,7 +289,7 @@ function linkDarwin(io: ILinkInputs): void {
   // version script. ⚠ An *empty* list here is not an error to `ld` — it is an instruction to export
   // nothing, obeyed in silence. The list's plausibility is therefore checked where it is parsed.
   const listPath = path.join(io.outDir, "webgpu_dawn.exports");
-  fs.writeFileSync(listPath, `${io.exports.map((n) => `_${n}`).join("\n")}\n`);
+  fs.writeFileSync(listPath, machOExportsList(io.exports));
   info(`${io.rid}: ${io.exports.length} exports → ${path.basename(listPath)}`);
   run(
     "c++",
@@ -272,6 +297,10 @@ function linkDarwin(io: ILinkInputs): void {
       "-dynamiclib",
       "-o", io.outLib,
       "-Wl,-force_load", io.staticLib,
+      // The shim, fused — forced in by name for the same reason as on Linux: an exported-symbols
+      // list does not pull archive members, it only filters what is already linked.
+      ...SHIM_EXPORTS.map((n) => `-Wl,-u,_${n}`),
+      io.shimLib,
       "-Wl,-exported_symbols_list", listPath,
       "-framework", "Foundation",
       "-framework", "IOSurface",
@@ -298,7 +327,7 @@ function linkDarwin(io: ILinkInputs): void {
  * until the first `dlsym`, so it is checked here instead.
  */
 function verifyExports(io: ILinkInputs): {
-  count: number;
+  names: Set<string>;
   reader: string;
   sample: string[];
   lineCount: number;
@@ -368,13 +397,13 @@ function verifyExports(io: ILinkInputs): {
         `       An unverified library must not be published, so this is an error rather than a note.`,
     );
   }
-  const found = wgpuSymbolsIn(text);
-  // Carried out so a zero can be *shown* rather than asserted. "0 symbols" has two very different
-  // causes — the library exports nothing, or the reader's output is not shaped the way the parser
-  // expects — and they are indistinguishable from a count alone. The Mach-O underscore regression
-  // was the second kind, and three lines of the listing would have ended it on the spot.
+  // The sample is carried out so a zero can be *shown* rather than asserted. "0 symbols" has two
+  // very different causes — the library exports nothing, or the reader's output is not shaped the
+  // way the parser expects — and they are indistinguishable from a count alone. The Mach-O
+  // underscore regression was the second kind, and three lines of the listing would have ended it
+  // on the spot.
   const lines = text.split("\n").filter((l) => l.trim());
-  return { count: found.size, reader, sample: lines.slice(0, 3), lineCount: lines.length };
+  return { names: wgpuSymbolsIn(text), reader, sample: lines.slice(0, 3), lineCount: lines.length };
 }
 
 function main(argv: string[]): void {
@@ -420,7 +449,25 @@ function main(argv: string[]): void {
   // wgpu-native fetcher and the shim installer use.
   displace(outLib);
 
-  const io: ILinkInputs = { rid, staticLib, header, exports: api.names, outDir, outLib };
+  // One cargo build, shared with `shim:build`. On Linux it runs inside the same container as the C++
+  // link — a shim compiled against the runner's glibc and fused into a library linked in
+  // manylinux_2_28 raises the floor of the result and nothing says so.
+  let shim;
+  try {
+    shim = buildShimCrate(rid, { container: CONTAINER, onCommand: (c) => info(`${rid}: ${c}`) });
+  } catch (e) {
+    fail(`${rid}: building the ABI shim failed — ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  const io: ILinkInputs = {
+    rid,
+    staticLib,
+    shimLib: shim.staticlib,
+    header,
+    exports: [...api.names, ...SHIM_EXPORTS],
+    outDir,
+    outLib,
+  };
   const mib = (fs.statSync(staticLib).size / 1024 / 1024).toFixed(0);
   info(`${rid}: linking ${path.basename(staticLib)} (${mib} MiB) → ${path.basename(outLib)}`);
 
@@ -435,18 +482,31 @@ function main(argv: string[]): void {
   const size = (fs.statSync(outLib).size / 1024 / 1024).toFixed(1);
 
   const exported = verifyExports(io);
-  if (exported.count < 200) {
+  // Two surfaces, counted separately. A single total would let one of them vanish behind the other:
+  // the shim's names begin with `wgpu` too, so 292 and 277 both clear any threshold worth setting.
+  const api277 = [...exported.names].filter((n) => !n.startsWith("wgpu_bun_shim_"));
+  const missingShim = SHIM_EXPORTS.filter((n) => !exported.names.has(n));
+
+  if (api277.length < 200) {
     fail(
-      `${rid}: linked, but only ${exported.count} wgpu* symbols are exported (read with \`${exported.reader}\`).\n` +
+      `${rid}: linked, but only ${api277.length} Dawn wgpu* symbols are exported (read with \`${exported.reader}\`).\n` +
         `       A library that links and exports nothing fails at the first dlsym, far from here.\n` +
         `       Zero usually means the export filter matched nothing: the generated .def, the version\n` +
         `       script, or the -exported_symbols_list — not the link itself.\n` +
         `       The reader printed ${exported.lineCount} line(s); the first few were:\n` +
         exported.sample.map((l) => `         ${l}`).join("\n"),
     );
-  } else {
-    ok(`${rid}: ${exported.count} wgpu* symbols exported (${exported.reader})`);
   }
+  if (missingShim.length > 0) {
+    fail(
+      `${rid}: the ABI shim was not fused in — ${missingShim.length} of ${SHIM_EXPORTS.length} ` +
+        `trampolines are missing from the library:\n` +
+        missingShim.map((n) => `         ${n}`).join("\n") +
+        `\n       The archive was passed to the linker, so this is the forcing that failed: nothing in\n` +
+        `       Dawn references these, and an unreferenced archive member is simply not pulled in.`,
+    );
+  }
+  ok(`${rid}: ${api277.length} Dawn + ${SHIM_EXPORTS.length} shim symbols exported (${exported.reader})`);
 
   fs.writeFileSync(path.join(VENDOR_DIR, rid, ".dawn-version"), `${DAWN_TAG}\n`);
   ok(`${rid}: Dawn ${DAWN_TAG} → vendor/${rid}/lib/${path.basename(outLib)} (${size} MiB, ${seconds}s)`);

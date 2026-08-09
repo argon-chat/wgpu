@@ -153,6 +153,12 @@ vendor/
 # same reason as above.
 shim/target/
 
+# A Rust toolchain installed *into the workspace* by the Linux Dawn leg. The shim has to be compiled
+# inside the same manylinux container as the C++ link — a shim built against the runner's newer glibc
+# and fused into that library raises its floor without saying so — and containers have no writable
+# $HOME, so CARGO_HOME/RUSTUP_HOME land here. See scripts/shimBuild.ts.
+shim/.container-rust/
+
 # NOTE: the design notes that briefly lived in docs/ have been moved out of this repository
 # entirely — they cite a private codebase's paths, tooling and pins, and this repository is meant
 # to be published. There is deliberately no `docs/` ignore rule here: if public documentation is

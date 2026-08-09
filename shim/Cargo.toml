@@ -9,11 +9,17 @@ license = "MIT"
 description = "Flat-C-ABI shim over wgpu-native's by-value callback-info entry points, for wgpu-bun."
 publish = false
 
-# A `cdylib` and nothing else. There is no Rust consumer of this crate — its only caller is a
-# `dlopen` from JavaScript — so an `rlib` would be dead weight in every build.
+# Two artefacts from one build, and still no `rlib`: there is no Rust consumer of this crate.
+#
+#   cdylib     the standalone shim beside wgpu-native — loaded by `dlopen` from JavaScript.
+#   staticlib  the same code fused into the Dawn library at link time, so a Dawn install is one
+#              file that carries both the C API and these trampolines. See `scripts/dawn-link.ts`.
+#
+# One `cargo build` emits both, so the fused copy is byte-for-byte the same code as the standalone
+# one rather than a second build with its own flags.
 [lib]
 name = "wgpu_bun_shim"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "staticlib"]
 
 # No dependencies, deliberately. Everything this crate needs (`c_void`, `dlopen`, `LoadLibraryW`) is
 # reachable from `core::ffi` and `std`, and a supply-chain-sensitive package should not grow a

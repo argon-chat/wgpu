@@ -77,6 +77,13 @@ const SHIM_ABI_VERSION: u32 = 3;
 /// generation they were written against. Pairing this shim with a different wgpu-native major is the
 /// one runtime failure mode a compiled shim *adds* over the JS-only path, so it is checked rather
 /// than assumed.
+///
+/// ⚠ This crate now also ships **fused into the Dawn library** (`scripts/dawn-link.ts`), where the
+/// number means something narrower than its name suggests. The declarations remain valid there —
+/// Dawn and wgpu-native expose the same `webgpu.h` ABI, measured aggregate by aggregate — but Dawn
+/// has no wgpu-native generation, so a caller that reads this value must not compare it against a
+/// loaded wgpu-native's major unless that is the backend in use. It says which header shape these
+/// structs match, not which library they are talking to.
 const SHIM_TARGET_GENERATION: u32 = 29;
 
 // ────────────────────────────────────────────────────────────────────────────────────────────────

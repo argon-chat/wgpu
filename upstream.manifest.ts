@@ -19,6 +19,7 @@
  * So each upstream carries a policy, and the checker reports an *event kind* rather than a boolean.
  */
 
+import { DAWN_TAG } from "./dawn.manifest.ts";
 import { WGPU_NATIVE_TAG } from "./wgpu-native.manifest.ts";
 
 /** How to decide that an upstream needs attention. */
@@ -81,10 +82,12 @@ export const TRACKED_UPSTREAMS: readonly IUpstream[] = [
     // Six months. Dawn tags are `vYYYYMMDD.HHMMSS` per commit, so there is no version signal to
     // react to — only a date to measure against.
     policy: { kind: "cadence", everyMonths: 6 },
-    // Not adopted yet: no Dawn binding ships from this repository. Tracking starts before consuming
-    // on purpose — the first adoption then has a recorded date for the cadence to run from, instead
-    // of the clock starting at whatever moment someone remembers to add it.
-    adopted: null,
+    // Read from the manifest that drives `dawn:fetch`, for the same reason wgpu-native's is: two
+    // records of "which revision do we ship" diverge, and this one already did. The watcher filed
+    // "Dawn is tracked but nothing is pinned yet" on the same day the three linked libraries went
+    // green, because the pin lived in `dawn.manifest.ts` and this field was a separate `null`.
+    // The date is when the pin was adopted here, not when Google cut it — that is the cadence clock.
+    adopted: { tag: DAWN_TAG, date: "2026-08-09" },
     bumpCost:
       "Dawn ships static archives only, so a bump is re-linking the shared library per platform " +
       "against the new release, then the full suite.",

@@ -1,4 +1,11 @@
-# Link Dawn's pinned static release into the shared library `bun:ffi` can load.
+# Link Dawn's pinned static release, plus this repository's ABI shim, into the one shared library
+# `bun:ffi` can load.
+#
+# The shim is **fused in**, not shipped beside: `bun:ffi` cannot express a C aggregate passed by
+# value, and both directions of the WebGPU C API do it, so a Dawn install that carried only the API
+# would still need a second file to be usable. One `cargo build` produces the same objects the
+# standalone shim ships, and they are linked into this library — so a Dawn platform package is one
+# binary, and the trampolines resolve Dawn's `wgpu*` from inside the module they live in.
 #
 # ── Why this is a workflow and not a local build step ───────────────────────────────────────────
 #
@@ -43,6 +50,14 @@ on:
       - "dawn.manifest.ts"
       - "scripts/dawn-fetch.ts"
       - "scripts/dawn-link.ts"
+      - "scripts/dawnHeaders.ts"
+      - "scripts/exportFilters.ts"
+      - "scripts/symbolTable.ts"
+      # The shim is fused into the library this job produces, so its sources are inputs here too —
+      # including the seam's `SHIM_EXPORTS`, which is the list the export filters are built from.
+      - "scripts/shimBuild.ts"
+      - "shim/**"
+      - "src/ffi/abiSeam.ts"
       - ".github/workflows/dawn-build.yml"
   pull_request:
     paths: *dawn_paths
@@ -105,5 +120,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: webgpu-dawn-${{ matrix.rid }}
-          path: vendor/${{ matrix.rid }}/lib/*webgpu_dawn*
+          # The loadable library and nothing else. A `*webgpu_dawn*` glob also sweeps up the
+          # generated `.def` and MSVC's `.exp`/import `.lib` — build inputs and byproducts that are
+          # of no use to a consumer and would travel in the platform package looking like product.
+          path: |
+            vendor/${{ matrix.rid }}/lib/webgpu_dawn.dll
+            vendor/${{ matrix.rid }}/lib/libwebgpu_dawn.so
+            vendor/${{ matrix.rid }}/lib/libwebgpu_dawn.dylib
           if-no-files-found: error
