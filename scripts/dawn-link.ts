@@ -46,6 +46,7 @@ import {
   dawnLibFileName,
   dawnRids,
 } from "../dawn.manifest.ts";
+import { findAllByBasename, findApiHeader } from "./dawnHeaders.ts";
 import { displace } from "./displace.ts";
 import { wgpuSymbolsIn } from "./symbolTable.ts";
 
@@ -63,28 +64,29 @@ function ok(message: string): void {
   console.log(`\x1b[32mok\x1b[0m     ${message}`);
 }
 
-/** Every file under `dir`, recursively. */
-function walk(dir: string, out: string[] = []): string[] {
-  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-    const p = path.join(dir, entry.name);
-    if (entry.isDirectory()) walk(p, out);
-    else out.push(p);
-  }
-  return out;
-}
-
 /**
- * Find a file by basename anywhere in the extracted tree.
+ * Find the one file with this basename anywhere in the extracted tree.
  *
  * Probed rather than hardcoded: Windows puts the archive in `lib/` and Linux in `lib64/`, and
  * upstream's layout is not a documented contract. A probe turns a reshuffle into "not found in
  * archive" instead of a silently empty directory — the same rule `fetch-wgpu-native.ts` follows.
+ *
+ * ⚠ **Ambiguity is an error, not a coin toss.** An earlier version returned the first match, and the
+ * header probe using that rule picked a different `webgpu.h` on APFS than on NTFS — see
+ * `dawnHeaders.ts` for what that cost. A probe is only sound while exactly one file can answer; the
+ * moment two can, the tree is not the shape this script assumes and it has to say so.
  */
-function findByBasename(root: string, names: readonly string[]): string | null {
-  const all = walk(root);
+function findOneByBasename(root: string, names: readonly string[]): string | null {
   for (const name of names) {
-    const hit = all.find((p) => path.basename(p) === name);
-    if (hit) return hit;
+    const hits = findAllByBasename(root, [name]);
+    if (hits.length === 1) return hits[0]!;
+    if (hits.length > 1) {
+      fail(
+        `${name} is ambiguous — ${hits.length} of them under ${root}:\n` +
+          hits.map((h) => `         ${path.relative(root, h)}`).join("\n") +
+          `\n       Pick by a rule about content, not by walk order.`,
+      );
+    }
   }
   return null;
 }
@@ -127,27 +129,19 @@ function run(cmd: string, args: string[], cwd: string, env: Record<string, strin
   if (r.status !== 0) fail(`${program} exited ${r.status}`);
 }
 
-/**
- * The C API, read out of the pinned header.
- *
- * Only `WGPU_EXPORT`-declared functions count. A looser scan (`/wgpu[A-Za-z]+\(/`) also picks up
- * the header's own macros — `wgpu_ENUM_ZERO_INIT`, `wgpu_MAKE_INIT_STRUCT` — which are not symbols
- * and make the linker fail on names that never existed. Measured: 277 declarations, matching the
- * count of `wgpu*` symbols in the archive exactly.
- */
-function exportedFunctions(headerPath: string): string[] {
-  const text = fs.readFileSync(headerPath, "utf-8");
-  const names = new Set<string>();
-  for (const m of text.matchAll(/^WGPU_EXPORT\s+[^(;]*?\b(wgpu[A-Za-z0-9_]+)\s*\(/gm)) {
-    names.add(m[1]!);
-  }
-  return [...names].sort();
-}
-
 interface ILinkInputs {
   readonly rid: Rid;
   readonly staticLib: string;
   readonly header: string;
+  /**
+   * The C API names, parsed from {@link header} once in `main`.
+   *
+   * Once, and in one place, because the guard that they are plausible has to cover every platform.
+   * It used to live inside the Windows path only, so when the header probe returned a decoy the
+   * Windows leg failed with "the header shape changed" and the macOS leg wrote an empty export list
+   * and linked a library that exported nothing.
+   */
+  readonly exports: readonly string[];
   readonly outDir: string;
   readonly outLib: string;
 }
@@ -221,11 +215,9 @@ function runInMsvcEnv(cmd: string, args: string[], cwd: string): void {
 }
 
 function linkWindows(io: ILinkInputs): void {
-  const names = exportedFunctions(io.header);
-  if (names.length < 200) fail(`only ${names.length} exports parsed from ${io.header} — the header shape changed`);
   const defPath = path.join(io.outDir, "webgpu_dawn.def");
-  fs.writeFileSync(defPath, `EXPORTS\n${names.map((n) => `    ${n}`).join("\n")}\n`);
-  info(`${io.rid}: ${names.length} exports → ${path.basename(defPath)}`);
+  fs.writeFileSync(defPath, `EXPORTS\n${io.exports.map((n) => `    ${n}`).join("\n")}\n`);
+  info(`${io.rid}: ${io.exports.length} exports → ${path.basename(defPath)}`);
 
   // System libraries per Dawn's own installed `DawnTargets.cmake`. Notably absent: d3d12/dxgi/dxc —
   // Dawn loads those at runtime, which is also why `d3dcompiler_47.dll` has to travel beside the
@@ -268,11 +260,12 @@ function linkLinux(io: ILinkInputs): void {
 }
 
 function linkDarwin(io: ILinkInputs): void {
-  const names = exportedFunctions(io.header);
   // Mach-O wants the leading underscore, and an explicit list for the same reason Linux wants a
-  // version script.
+  // version script. ⚠ An *empty* list here is not an error to `ld` — it is an instruction to export
+  // nothing, obeyed in silence. The list's plausibility is therefore checked where it is parsed.
   const listPath = path.join(io.outDir, "webgpu_dawn.exports");
-  fs.writeFileSync(listPath, `${names.map((n) => `_${n}`).join("\n")}\n`);
+  fs.writeFileSync(listPath, `${io.exports.map((n) => `_${n}`).join("\n")}\n`);
+  info(`${io.rid}: ${io.exports.length} exports → ${path.basename(listPath)}`);
   run(
     "c++",
     [
@@ -405,12 +398,20 @@ function main(argv: string[]): void {
     );
   }
 
-  const staticLib = findByBasename(extracted, DAWN_STATIC_BASENAMES);
+  const staticLib = findOneByBasename(extracted, DAWN_STATIC_BASENAMES);
   if (!staticLib) {
     fail(`${rid}: none of ${DAWN_STATIC_BASENAMES.join(", ")} found under vendor/.dawn-${rid}`);
   }
-  const header = findByBasename(extracted, ["webgpu.h"]);
-  if (!header) fail(`${rid}: webgpu.h not found under vendor/.dawn-${rid}`);
+
+  // Three files in the archive are called `webgpu.h` and two of them declare nothing. Chosen by
+  // content — see `dawnHeaders.ts` for what choosing by walk order cost on APFS.
+  const api = findApiHeader(extracted);
+  if ("error" in api) fail(`${rid}: ${api.error}`);
+  const header = api.path;
+  info(
+    `${rid}: ${api.names.length} exported functions in ${path.relative(extracted, header)}` +
+      (api.candidates.length > 1 ? ` (of ${api.candidates.length} files named webgpu.h)` : ""),
+  );
 
   const outDir = path.join(VENDOR_DIR, rid, "lib");
   fs.mkdirSync(outDir, { recursive: true });
@@ -419,7 +420,7 @@ function main(argv: string[]): void {
   // wgpu-native fetcher and the shim installer use.
   displace(outLib);
 
-  const io: ILinkInputs = { rid, staticLib, header, outDir, outLib };
+  const io: ILinkInputs = { rid, staticLib, header, exports: api.names, outDir, outLib };
   const mib = (fs.statSync(staticLib).size / 1024 / 1024).toFixed(0);
   info(`${rid}: linking ${path.basename(staticLib)} (${mib} MiB) → ${path.basename(outLib)}`);
 
