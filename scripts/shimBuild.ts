@@ -132,11 +132,24 @@ function buildInContainer(image: string, target: string, opts: IBuildOptions): v
     "set -e",
     `export CARGO_HOME=${rustDir}/cargo RUSTUP_HOME=${rustDir}/rustup`,
     `export PATH=$CARGO_HOME/bin:$PATH`,
-    // `command -v` and not a file test: the toolchain is usable when its binary is on PATH, which
-    // is the thing actually needed. A directory can exist from a half-finished download.
-    `if ! command -v cargo >/dev/null 2>&1; then`,
-    `  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path`,
+    // ⚠ The test is whether cargo **runs**, not whether it is on PATH. `dockcross/manylinux_2_28-x64`
+    // already ships rustup's shims, so `command -v cargo` succeeds — and then the shim exits with
+    // "could not choose a version of cargo to run, because one wasn't specified explicitly", because
+    // the image configures no default toolchain (and this build points RUSTUP_HOME at an empty
+    // workspace directory anyway). A presence check answered the wrong question and skipped the
+    // install that would have fixed it.
+    `if ! cargo --version >/dev/null 2>&1; then`,
+    `  if command -v rustup >/dev/null 2>&1; then`,
+    // rustup is already there — it just has nothing selected. Installing over it would be a second
+    // toolchain in the same image; selecting one is the actual repair.
+    `    rustup default stable`,
+    `  else`,
+    `    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain stable --no-modify-path`,
+    `  fi`,
     `fi`,
+    // Printed, so the log records which toolchain actually produced the fused objects rather than
+    // leaving it to be inferred from the image tag.
+    `cargo --version && rustc --version`,
     `cd ${PKG_ROOT}/shim && cargo build --release --target ${target}`,
   ].join("\n");
 
