@@ -1,20 +1,22 @@
-# Watch gfx-rs/wgpu-native for a release newer than the tag we pin, and open an issue when there is
-# one.
+# Watch the upstreams this repository tracks and file a tracking issue when one needs attention.
 #
-# The pin is deliberate: wgpu-native's C ABI, its WGSL front end and its set of unimplemented
+# The pins are deliberate: an upstream's C ABI, its shader front end and its set of unimplemented
 # symbols all move between releases, so this repository never tracks "latest". This workflow exists
 # so that "deliberate" does not quietly become "forgotten".
 #
-# Two design points worth keeping if this is ever edited:
+# ── Why one daily run rather than a cron per policy ─────────────────────────────────────────────
 #
-#   * It must not open a new issue every morning. Before creating one it looks for an OPEN issue
-#     whose title already names the same upstream tag, and does nothing if it finds one. The title
-#     is therefore deterministic and load-bearing — do not make it prettier without updating the
-#     search.
+# The policies live in `upstream.manifest.ts`, and one of them is time-based: Dawn releases per
+# commit with no semver, so it is adopted on a six-month cadence rather than chased by version.
 #
-#   * A run that could not reach the API, or could not parse the manifest, FAILS. It does not report
-#     "up to date". A watcher that cannot tell the difference between "nothing new" and "I am
-#     broken" will sit silently broken for months, which is worse than not having one.
+# The obvious encoding would be a second, semiannual cron. It is the wrong one. A cron that fires
+# twice a year has two failure modes with no middle ground: if that single run is broken, rate
+# limited, or lands while the API is down, the next attempt is six months later — and nothing says
+# so. Making the *policy* own the date and the *schedule* merely ask often turns a missed run into a
+# one-day delay, and lets the window open on its own day instead of on a hardcoded 1 January.
+#
+# So: ask daily, answer by policy. `check:upstream` reports an event KIND — `major`, `minor`,
+# `cadence-due`, `not-adopted` — and stays silent the rest of the time however many releases go past.
 
 name: upstream-watch
 
@@ -43,81 +45,19 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Compare the pinned tag with upstream
-        id: check
+      - name: Report the state of every tracked upstream
+        # Always runs, and prints the quiet ones too, so a green run reads as "these were checked"
+        # rather than as "something printed nothing". Exit 10 means "an event" and is not a failure
+        # here — the filing step below decides what to do about it.
         env:
-          # Lifts the anonymous API rate limit; read-only, and the default token is enough.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -o pipefail
-          result="$(bun run scripts/check-upstream.ts --json)" || true
-          echo "$result"
+        run: bun run check:upstream || [ $? -eq 10 ]
 
-          ok="$(echo "$result" | jq -r '.ok // false')"
-          if [ "$ok" != "true" ]; then
-            echo "::error::upstream check could not determine the state: $(echo "$result" | jq -r '.error // "no output"')"
-            echo "A watcher that cannot tell 'nothing new' from 'I am broken' is worse than none."
-            exit 1
-          fi
-
-          {
-            echo "behind=$(echo "$result" | jq -r '.behind')"
-            echo "pinned=$(echo "$result" | jq -r '.pinned')"
-            echo "latest=$(echo "$result" | jq -r '.latest')"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Open an issue if we are behind
-        if: steps.check.outputs.behind == 'true'
+      - name: File a tracking issue per actionable event
+        # Deduped on the issue title among OPEN issues, so a daily run cannot produce a daily issue.
+        # A run that cannot determine the state exits non-zero and fails the workflow on purpose.
         env:
+          # Lifts the anonymous API rate limit for the checker, and authenticates `gh` for filing.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PINNED: ${{ steps.check.outputs.pinned }}
-          LATEST: ${{ steps.check.outputs.latest }}
-        run: |
-          set -euo pipefail
-          TITLE="wgpu-native ${LATEST} is available (pinned: ${PINNED})"
-
-          # Idempotence. Without this the workflow files one issue per day for the same release.
-          existing="$(gh issue list --state open --search "in:title ${LATEST}" \
-            --json number,title --jq ".[] | select(.title == \"${TITLE}\") | .number" | head -n1)"
-          if [ -n "$existing" ]; then
-            echo "Issue #${existing} already tracks ${LATEST} — nothing to do."
-            exit 0
-          fi
-
-          # The label is convenience, not structure: the search above matches on title, so a missing
-          # or manually deleted label can never cause a duplicate.
-          gh label create upstream-update --color 0E8A16 \
-            --description "A newer wgpu-native release is available" 2>/dev/null || true
-
-          gh issue create \
-            --title "$TITLE" \
-            --label upstream-update \
-            --body "$(cat <<EOF
-          @0xf6 — upstream cut a release newer than the one this repository pins.
-
-          | | |
-          |---|---|
-          | pinned | \`${PINNED}\` |
-          | upstream | \`${LATEST}\` |
-          | changes | https://github.com/gfx-rs/wgpu-native/compare/${PINNED}...${LATEST} |
-
-          Bumping is **not** just editing the tag. A release can move the C ABI, the WGSL front end,
-          and the set of exported-but-unimplemented symbols that abort when called — so the pin
-          carries measured artefacts that have to be re-measured together:
-
-          - [ ] \`bun run fetch --update-hashes\` — new URLs and sha256 for every platform
-          - [ ] \`bun run gen:layouts\` — struct layouts are derived from the vendored headers, and the
-                oracle compares them against a real C compiler; a bumped pin with stale generated
-                layouts is exactly the silent-offset-shift this setup exists to prevent
-            - [ ] \`bun test test/layout-oracle.test.ts\`
-          - [ ] re-derive the abort-on-call symbol list and diff it — a release may add or, better,
-                remove one; \`bun test test/abort-symbols.test.ts\`
-          - [ ] confirm the upstream archive still ships no licence text, and that our vendored copy
-                still matches the new tag
-          - [ ] full suite on every platform the matrix covers
-
-          Opened automatically by \`.github/workflows/upstream-watch.yml\`. It will not file a second
-          issue for \`${LATEST}\` while this one is open; close it to acknowledge, or leave it open as
-          the tracking issue for the bump.
-          EOF
-          )"
+        run: bun run upstream:issues

@@ -1,0 +1,102 @@
+# Link Dawn's pinned static release into the shared library `bun:ffi` can load.
+#
+# ── Why this is a workflow and not a local build step ───────────────────────────────────────────
+#
+# Two reasons, and the second is the important one.
+#
+# **Dawn ships static archives only.** Every release asset is `libwebgpu_dawn.a` / `webgpu_dawn.lib`,
+# so there is nothing to `dlopen` until someone links it. See `dawn.manifest.ts`.
+#
+# **The result has to be auditable.** What eventually reaches npm is a binary this repository
+# produced, not one upstream published, so "trust us" is the whole question. Building it in a public
+# Actions run means the provenance attestation binds a commit here to those bytes, and the pinned
+# input — tag, URL, sha256 in `dawn.manifest.ts` — means anyone can fetch the same archive and check
+# it. Two pins, both verifiable, neither taken on faith.
+#
+# ── What each leg does, and why they are not the same job ──────────────────────────────────────
+#
+#   linux-x64     the compiler runs inside `dockcross/manylinux_2_28-x64`, which is the image Dawn's
+#                 own CI builds in. Linking those objects on a bare runner produces a library that
+#                 needs *that runner's* glibc and silently forfeits the 2.28 floor.
+#   darwin-arm64  native, with MACOSX_DEPLOYMENT_TARGET pinned to Dawn's own 12.0.
+#   win32-x64     native, and the only leg that needs a generated `.def`: Dawn's `WGPU_EXPORT` is
+#                 empty in a static configuration, so the objects carry no `dllexport` at all.
+#
+# ⚠ The Windows link needs an MSVC toolset no older than the one Dawn was built with. Measured
+# locally: MSVC 14.50.35717 fails on `__std_min_element_4u` and two siblings — vectorised STL helpers
+# whose unsigned variants it does not ship. Dawn's releases are built on `windows-latest`, so this
+# job matching that image is not incidental, it is the mechanism. Pin the runner deliberately.
+#
+# ⚠ `linux-arm64` is absent because Google publishes no arm64 Linux desktop build. That platform
+# needs a source build (~20 min on an arm64 runner), which is a different job and is not here yet.
+
+name: dawn-build
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "dawn.manifest.ts"
+      - "scripts/dawn-fetch.ts"
+      - "scripts/dawn-link.ts"
+      - ".github/workflows/dawn-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dawn-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  link:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
+    # The archive is 111 MiB compressed and ~585 MiB expanded on Windows; the link itself takes
+    # seconds. This bounds a stall, not the work.
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - rid: linux-x64
+            runner: ubuntu-latest
+            # Dawn's own Linux release is built here. Matching it is what keeps the glibc floor.
+            container: dockcross/manylinux_2_28-x64
+          - rid: darwin-arm64
+            runner: macos-15
+            container: ""
+          - rid: win32-x64
+            # NOT `windows-latest`: this leg's correctness depends on the MSVC toolset being no older
+            # than Dawn's, and Dawn builds on the `windows-latest` image. Tracking the same label is
+            # deliberate — if the images diverge, the link fails loudly with named symbols.
+            runner: windows-latest
+            container: ""
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - run: bun install --frozen-lockfile
+
+      - name: Fetch the pinned Dawn release
+        # Pinned by URL + sha256; a mismatch hard-fails here rather than producing a library nobody
+        # can trace back to an input.
+        run: bun run dawn:fetch --rid ${{ matrix.rid }}
+
+      - name: Link the shared library
+        # The recipe lives in `scripts/dawn-link.ts`, including the container wrapping — one place
+        # owns it, so the workflow and the script cannot drift apart about how the link is done.
+        env:
+          DAWN_LINK_CONTAINER: ${{ matrix.container }}
+        run: bun run dawn:link --rid ${{ matrix.rid }}
+
+      - name: Upload the library
+        uses: actions/upload-artifact@v4
+        with:
+          name: webgpu-dawn-${{ matrix.rid }}
+          path: vendor/${{ matrix.rid }}/lib/*webgpu_dawn*
+          if-no-files-found: error

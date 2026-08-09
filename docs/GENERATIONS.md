@@ -1,11 +1,9 @@
 # More than one wgpu-native generation
 
-`wgpu-bun@29.x` **ships** wgpu-native v29 and **accepts** v27.
-
-That is two different statements and the difference matters. The platform npm package carries one
-library — one tarball cannot hold two and pretend the choice is free. What the binding will *load*
-is a set: point it at a v27 library and it runs, because the whole suite has been executed against
-that library on every supported platform.
+`wgpu-bun@29.x` **ships** wgpu-native v29 and **accepts** v27. The platform npm package carries one
+library — one tarball cannot hold two — but what the binding will *load* is a set: point it at a v27
+library and it runs, because the whole suite has been executed against that library on every
+supported platform.
 
 - [Why](#why)
 - [What was measured](#what-was-measured)
@@ -15,15 +13,12 @@ that library on every supported platform.
 
 ## Why
 
-The reason this package exists is that a binding is where you choose the implementation your
-JavaScript is validated against ([ERROR-PATH.md](./ERROR-PATH.md#wgpu-native-rather-than-dawn--a-deliberate-backend-choice)).
+A binding is where you choose the implementation your JavaScript is validated against
+([ERROR-PATH.md](./ERROR-PATH.md#wgpu-native-rather-than-dawn--a-deliberate-backend-choice)).
 Pinning exactly one generation takes half of that back: a project whose Rust half is on wgpu 27
-cannot have its JavaScript half validated against wgpu 27, which is precisely the mismatch the
-choice-of-backend argument is about. The generation is as much a part of "which implementation" as
-Dawn-versus-wgpu is.
-
-Upstream's generations are also sparse and slow: v25, then v27, then v29 — no v26, no v28. "Upgrade
-to keep up" is a bigger ask when each step is a real behaviour change.
+cannot have its JavaScript half validated against wgpu 27. The generation is as much a part of
+"which implementation" as Dawn-versus-wgpu is — and upstream's are sparse and slow (v25, v27, v29;
+no v26, no v28), so "upgrade to keep up" is a real ask.
 
 ## What was measured
 
@@ -31,62 +26,58 @@ On `win32-x64` (NVIDIA discrete, D3D12), running the full suite against each lib
 
 | | v29.0.1.1 | v27.0.4.1 |
 |---|---|---|
-| Suite result | 330 pass / 0 fail | **330 pass / 0 fail** |
+| Suite result | 331 pass / 5 skip / 0 fail | **322 pass / 5 skip / 0 fail** |
 | `webgpu.h` layout tables — everything the binding packs | — | **identical** to v29's |
-| `wgpu.h` extension tables | — | **11 aggregates differ**, none of them used |
+| `wgpu.h` extension tables | 23 aggregates | **18; 11 names differ**, none of them used |
 | `check:layouts` against that generation's own headers | green | **green** |
 | Symbols the binding calls | all present | all present |
 | ABI shim | binds | **binds, unmodified** |
 | Backend override (`WGPU_BUN_BACKEND=vulkan`) | takes effect | **takes effect** |
 | Blocklisted abort-on-call symbols exported | 40 | **36** |
 
-The layout row is the load-bearing one, and the split in it is the whole story. **`webgpu.h` — the
-115 aggregates the binding actually packs — is identical across the two generations.** What moves is
-`wgpu.h`, wgpu-native's own extension header: display handles and border-colour sampling appear in
-v29, push constants appear in v27, and `WGPUInstanceExtras` / `WGPUNativeLimits` exist in both with
-different members.
+The nine-case gap in the totals is not missing coverage: `layout-oracle` emits one test per aggregate
+and `abort-symbols` one per blocklisted symbol, so both shrink with what the loaded generation has —
+5 fewer `wgpu.h` aggregates, 4 fewer symbols.
 
-None of those eleven is packed, read or named by this binding, which is why the suite is green on
-either library. `GENERATION_VARIANT_AGGREGATES` in `wgpu-native.manifest.ts` declares them by name;
-`check:layouts` permits exactly those to differ on a non-default generation and nothing else, and
-`test/generations.test.ts` asserts that none of them appears anywhere in `src/`. The tolerance is
-bound to the fact that justifies it, in the same suite — the day a generation moves something the
-binding does use, the check fails with a name attached.
+The layout row is the load-bearing one. **`webgpu.h` — the 92 aggregates the binding packs — is
+identical across the two generations**: regenerating the tables from v27's headers reproduces the
+committed `webgpu.structs.ts` byte for byte. What moves is `wgpu.h`, wgpu-native's own extension
+header — display handles, border-colour sampling and `WGPUImageSubresourceRange` appear in v29, push
+constants and `WGPUPipelineLayoutExtras` appear in v27, and `WGPUInstanceExtras` / `WGPUNativeLimits`
+exist in both with different members. (The 115 figure elsewhere is both headers together: 92 + 23.)
 
-Backend selection is worth calling out, because it looks like it should have broken: it goes through
-`WGPURequestAdapterOptions.backendType`, a **core** `webgpu.h` field, not through the
-`WGPUInstanceExtras` chain that differs. That is why an override still takes effect on v27.
+None of those eleven is packed or read by this binding. `GENERATION_VARIANT_AGGREGATES` in
+`wgpu-native.manifest.ts` declares them by name; `check:layouts` permits exactly those to differ on a
+non-default generation and nothing else, and `test/generations.test.ts` asserts that no hand-written
+line under `src/` mentions one (the generated tables are excluded — they are the inventory of the
+headers, not use of them). Tolerance and justification are checked by the same suite.
+
+Backend selection looks like it should have broken, and did not: it goes through
+`WGPURequestAdapterOptions.backendType`, a **core** `webgpu.h` field, not the `WGPUInstanceExtras`
+chain that differs.
 
 The four missing symbols are `wgpuExternalTexture{AddRef,Release,SetLabel}` and
-`wgpuTextureGetTextureBindingViewDimension`, all added to `webgpu.h` after v27. They are recorded in
-`FIRST_GENERATION` (`src/ffi/unimplemented.ts`) and `test/abort-symbols.test.ts` asserts the whole
-partition — an undeclared absence fails, and so does a declared absence that turns out to be
-present.
+`wgpuTextureGetTextureBindingViewDimension`, all added to `webgpu.h` after v27. `FIRST_GENERATION`
+(`src/ffi/unimplemented.ts`) records them and `test/abort-symbols.test.ts` asserts the whole
+partition — an undeclared absence fails, and so does a declared absence that turns out to be present.
 
 ### An earlier version of this table said "byte-identical", and it was wrong
 
-Worth recording, because the mistake is more instructive than the fact. The claim was measured on a
-developer machine and confirmed by a green `check:layouts` — but that machine had all four platforms
-cross-fetched into `vendor/`, and the generator picked the **alphabetically first** RID with headers.
-So it read `darwin-arm64`'s v29 headers while `win32-x64` held v27: the right tables validated
-against the wrong generation, reporting success. Only a CI runner, with exactly one vendored RID,
-could see it — and all four v27 legs went red at once.
-
-Two things came out of it. The generator now prefers the host's own RID and warns when `vendor/`
-holds more than one generation. And the comparison the check performs was itself found to be
-vacuous — its reader parsed **zero** aggregates out of every table, so "no differences found" was
-what it returned for any input; an empty parse is now a hard error rather than a pass.
+The claim was measured on a developer machine and confirmed by a green `check:layouts` — but that
+machine had all four platforms cross-fetched into `vendor/` and the generator picked the
+**alphabetically first** RID with headers, reading `darwin-arm64`'s v29 headers while `win32-x64`
+held v27. Only a runner with exactly one vendored RID could see it, and all four v27 CI legs went red
+at once. The generator now prefers the host's own RID and warns on a mixed tree. The comparison
+itself was also vacuous: its reader parsed **zero** aggregates out of every table, so "no differences
+found" was the answer for any input. An empty parse is now a hard error.
 
 ### The thing that did move, and did not bite
 
 ⚠ **`wgpu.h`'s extension enums renumbered.** `WGPUSType_ShaderSourceGLSL` is `0x00030004` in v27 and
-`0x00030003` in v29; `PipelineLayoutExtras` exists in v27 and is gone in v29. The binding survives
-the move because it touches none of them.
-
-That is a property to keep deliberately, not a fact to note once. A chained extension struct sent
-with the wrong `sType` is not rejected — it is **ignored**, or read as a different struct entirely.
-A backend override that silently stops taking effect looks exactly like a backend override that
-worked, which is why the table above bothers to check that one by execution.
+`0x00030003` in v29. The binding touches none of them, and should keep not touching them: a chained
+extension struct sent with the wrong `sType` is not rejected, it is **ignored** or read as a
+different struct entirely. A backend override that silently stops taking effect looks exactly like
+one that worked, which is why that row is checked by execution.
 
 ## Using a non-default generation
 
@@ -95,11 +86,9 @@ bun run fetch --generation 27    # into vendor/<rid>/, for a source checkout
 WGPU_NATIVE_LIB=/path/to/libwgpu_native.so bun test    # or point at one you already have
 ```
 
-Fetching does **not** disturb the ABI shim that lives beside it in `vendor/<rid>/lib/`, so switching
-generations does not mean rebuilding it.
-
-The binding reports what it actually loaded at first use — the generation comes from
-`wgpuGetVersion()`, never from a filename or a directory name:
+Fetching does **not** disturb the ABI shim beside it in `vendor/<rid>/lib/`. The binding reports what
+it actually loaded at first use — the generation comes from `wgpuGetVersion()`, never from a filename
+or a directory name:
 
 ```ts
 import { nativeVersion, SUPPORTED_GENERATIONS } from 'wgpu-bun';
@@ -117,34 +106,30 @@ wgpu-bun: wgpu-native 25.0.2.2 is generation 25, which this package has never be
   Set WGPU_BUN_ALLOW_UNTESTED_GENERATION=1 to proceed anyway, deliberately.
 ```
 
-This used to be a `console.warn`. A warning is the wrong instrument here for the same reason the
-rest of this package refuses rather than stubs: between generations the observable differences are
-validation strictness, WGSL acceptance and extension-struct numbering — none of which raise
-anything. They produce plausible wrong answers. A suite that runs green against a library its
-binding was never tested with has proven nothing, and nothing about it looks wrong. Warnings scroll
-past inside a test runner; a throw does not.
-
+This used to be a `console.warn`. Between generations the observable differences are validation
+strictness, WGSL acceptance and extension-struct numbering — none of which raise anything. They
+produce plausible wrong answers, and warnings scroll past inside a test runner.
 `WGPU_BUN_ALLOW_UNTESTED_GENERATION=1` exists because "unsupported" means *untested*, not *known
-broken*. It is a knob someone has to type, which makes running an untested combination possible and
-doing it by accident impossible.
+broken*; it is a knob someone has to type.
 
 ## Adding a generation
 
-The entry criterion is execution, not inspection. `ci.yml` runs the whole matrix — every platform ×
-every supported generation — so adding one means eight more legs of real evidence, or none.
+The entry criterion is execution, not inspection. `ci.yml` runs every platform × every supported
+generation — eight legs today — so adding a generation means four more legs of real evidence, or
+none.
 
 1. Add the tag and the four platform archives to `GENERATIONS` in `wgpu-native.manifest.ts`, with
-   **measured** hashes: `bun run fetch --generation <n> --update-hashes`, then paste. Never invent a
-   hash; an empty one means unpinned and the fetcher refuses it.
-2. `bun run fetch --generation <n>` and `bun run check:layouts`. Extension aggregates that differ
-   get added to `GENERATION_VARIANT_AGGREGATES` **only after** confirming the binding does not name
-   them — `test/generations.test.ts` enforces that half. If a `webgpu.h` aggregate differs, or one
-   the binding uses, stop: the answer there is per-generation tables, not a longer allow-list.
+   **measured** hashes: `bun run fetch --generation <n> --update-hashes`, then paste. An empty hash
+   means unpinned and the fetcher refuses it.
+2. `bun run fetch --generation <n>` and `bun run check:layouts`. Extension aggregates that differ go
+   into `GENERATION_VARIANT_AGGREGATES` **only after** confirming the binding does not name them —
+   `test/generations.test.ts` enforces that half. If a `webgpu.h` aggregate differs, or one the
+   binding uses, stop: the answer is per-generation tables, not a longer allow-list.
 3. `bun test`. Record what the suite says in the table above, including anything that had to change.
 4. Add the number to the `generation:` axis in `.github/workflows/ci.yml`.
-5. If the new generation adds or removes abort-on-call symbols, update `UNIMPLEMENTED` and
-   `FIRST_GENERATION` in `src/ffi/unimplemented.ts`. `bun run derive:aborts:source -- --check`
+5. If the generation adds or removes abort-on-call symbols, update `UNIMPLEMENTED` and
+   `FIRST_GENERATION` in `src/ffi/unimplemented.ts`. `bun run derive:aborts:source --check`
    re-derives the list from upstream's Rust source at the pinned tag.
 
-Removing one is the same work in reverse, and is the right answer when a generation starts costing
-more than it earns — this list is what has been tested, not a compatibility promise.
+Removing one is the same work in reverse, and is the right answer when a generation costs more than
+it earns — this list is what has been tested, not a compatibility promise.

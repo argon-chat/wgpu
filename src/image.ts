@@ -6,7 +6,7 @@
  * Every headless user writes these two functions, and both have a trap in them.
  *
  * `copyTextureToBuffer` requires a **256-byte-aligned row stride**, so the buffer that comes back
- * is almost never the image: a 1400-pixel-wide RGBA frame arrives with 5 600 bytes of pixels and 96
+ * is almost never the image: a 1400-pixel-wide RGBA frame arrives with 5 600 bytes of pixels and 32
  * bytes of padding per row, and code that ignores it gets a picture that shears progressively to
  * one side — which looks like a rendering bug and is not one. And the readback itself is a
  * four-step dance (staging buffer → `copyTextureToBuffer` → `mapAsync` → `getMappedRange`) whose

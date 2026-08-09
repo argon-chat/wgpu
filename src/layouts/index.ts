@@ -27,7 +27,7 @@
  * additionally aligns 8-byte scalars to 4 inside structs. That is refused loudly at first import
  * (`assertHost64Bit`), never approximated. Big-endian is refused the same way.
  *
- * Verified against a C compiler on `win32-x64`. On the other four RIDs the invariance argument above
+ * Verified against a C compiler on `win32-x64`. On the other three RIDs the invariance argument above
  * is reasoning from the ABI documents plus the absence of the divergent constructs in the headers —
  * the oracle test is written to run anywhere, but at the time of writing it has only been executed
  * on Windows x64.

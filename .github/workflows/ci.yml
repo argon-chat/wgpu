@@ -30,16 +30,14 @@
 #   Linux    — Mesa's lavapipe (`mesa-vulkan-drivers` + `libvulkan1`) is a CPU Vulkan 1.3+ driver.
 #              This is the mechanism wgpu's own CI uses; it is slow but it is a genuine adapter, and
 #              wgpu-native's Vulkan backend enumerates it without special pleading.
-#   Windows  — WARP, the D3D12 software rasteriser, ships with Windows and needs no install. Whether
-#              wgpu-native's D3D12 backend selects it on a hosted runner is not verified here; the
-#              leg therefore permits a skip and reports which way it went rather than asserting.
-#   macOS    — no software adapter exists. Hosted macOS runners expose a paravirtualised Metal
-#              device, which *should* be enough, but that is inference and not measurement. Both
-#              macOS legs permit a skip and report.
+#   Windows  — WARP, the D3D12 software rasteriser, ships with Windows and needs no install.
+#              Measured: wgpu-native's D3D12 backend does enumerate it on a hosted runner.
+#   macOS    — no software adapter exists, but hosted runners expose a paravirtualised Metal device.
+#              Measured: it comes up.
 #
-# Everything above marked "not verified" is exactly what this workflow's first run measures. The
-# preflight step prints the adapter on every leg, so the answer arrives as data in the run summary
-# instead of as an assumption in a comment.
+# All four were once "not verified", and every leg was allowed to skip while that was true. It is no
+# longer true, so no leg is: `allow_no_adapter` is `"0"` everywhere and a missing adapter is a
+# finding. The preflight step still prints the adapter it found, so the run summary says which one.
 
 name: ci
 
@@ -211,22 +209,11 @@ jobs:
         # This step needs no GPU and no linking — `sizeof`/`offsetof` are compile-time — so it is
         # the substantive thing every leg can assert even where the GPU tests cannot run.
         #
-        # NOTE: the oracle has only ever been executed on win32-x64. It stages shim headers that
-        # shadow the system ones, and whether that survives on Linux and macOS is exactly what this
-        # matrix measures. A failure here is a finding about the PROBE first and about the layouts
-        # second — check the compiler diagnostics before concluding an offset is wrong.
+        # On an alternate-generation leg this compares aggregate by aggregate rather than file by
+        # file: `wgpu.h`'s extension inventory legitimately differs between generations, and only the
+        # names declared in GENERATION_VARIANT_AGGREGATES may move. Anything else is a real layout
+        # change and fails here.
         run: bun run check:layouts
-
-      - name: The committed layouts must be right for THIS generation too
-        # `check:layouts` above compares the committed tables against the headers of whichever
-        # generation this leg fetched. That it passes on both is a measured fact, not a design
-        # guarantee: the tables carry member names and type tags only — no numbers — and the core
-        # `webgpu.h` aggregates happen to be identical across the supported generations.
-        #
-        # The day upstream changes one, THIS is the step that goes red, on the alternate-generation
-        # legs only, and the answer will be per-generation tables rather than a looser check. Saying
-        # so here means the failure arrives with its own explanation attached.
-        run: echo "layouts verified against $(cat vendor/${{ matrix.rid }}/.version)"
 
       - name: GPU preflight
         # Always exits 0. It reports the adapter and writes the marker `gpu-coverage` reads; the

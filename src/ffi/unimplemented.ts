@@ -25,7 +25,7 @@
  * Two independent sources, because a single one is not trustworthy: the shipped DLL and the tagged
  * source can be different commits, and the export table is exactly the thing that misleads.
  *
- * 1. **Behaviour-derived (primary, and what is written below).** Every exported symbol in the
+ * 1. **Behaviour-derived (primary).** Every exported symbol in the
  *    pinned headers was called once, in **its own subprocess**, with zeroed arguments; a symbol is
  *    a stub iff the child printed the Rust panic banner `not implemented`. This is sound because
  *    `unimplemented!()` is the first statement in these bodies — it fires before any argument is
@@ -38,8 +38,9 @@
  *    `src/lib.rs`, including both `MappedRange` entry points, and a derivation that reads only the
  *    obviously-named file reports 35 and misses the two that matter most.
  *
- * The two agree at 40 for this pin. Re-run (1) on every pin bump; the list changes only when the
- * pin does.
+ * The two agree at 40 for this pin, by execution: `bun run derive:aborts:probe` against the shipped
+ * `v29.0.1.1` binary reproduces this list exactly, in about a minute. Re-run it on a pin bump; it
+ * diffs against this list and exits non-zero on drift.
  *
  * ── Reading the list ────────────────────────────────────────────────────────────────────────────
  *
@@ -48,6 +49,8 @@
  * and no JS stack. This package therefore never forwards a label after creation; labels are only
  * ever passed *in descriptors at creation time*, where they work.
  */
+
+import { WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
 
 /**
  * The generation a blocklisted symbol first **exists** in.
@@ -169,7 +172,7 @@ export function isUnimplemented(symbol: string): boolean {
  * failure arrives as a stack trace pointing at the caller instead of as a Rust backtrace on stderr
  * followed by exit code `0xC0000409`.
  */
-export function assertImplemented(symbol: string, wgpuNativeVersion = "v29.0.1"): void {
+export function assertImplemented(symbol: string, wgpuNativeVersion = WGPU_NATIVE_TAG): void {
   if (!BLOCKED.has(symbol)) return;
   const alt = ALTERNATIVES[symbol];
   throw new Error(

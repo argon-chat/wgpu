@@ -17,7 +17,7 @@
  *     resolution at which it stops aliasing — so a single sample per pixel produces shimmer that no
  *     amount of extra resolution removes.
  *
- * The zoom is ~1.6 × 10⁴, which is comfortable in f32. Going much deeper needs f64 (which WGSL does
+ * The zoom is 5 556× — the figure the example prints — which is comfortable in f32. Going much deeper needs f64 (which WGSL does
  * not have) or double-float emulation, and this example does not pretend otherwise — that is a
  * different demonstration.
  */

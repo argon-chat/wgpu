@@ -88,7 +88,7 @@ export interface IGeneration {
  * project whose Rust half is on wgpu 27 cannot have its JavaScript half validated against wgpu 27.
  *
  * Supporting several is only defensible because it was **measured**, not assumed. Between v27 and
- * v29 the entire generated layout table set is byte-identical, every symbol the binding calls is
+ * v29 the `webgpu.h` layout tables are byte-identical, every symbol the binding calls is
  * present in both, and the full suite — render, compute, error scopes, readback, both seam paths —
  * runs green on either library. The only difference the suite could find is that four blocklisted
  * abort-on-call symbols do not exist at all in v27, which `src/ffi/unimplemented.ts` records.
@@ -150,7 +150,7 @@ export const GENERATIONS: Readonly<Record<number, IGeneration>> = {
  * C aggregates whose layout is **not** the same across the supported generations.
  *
  * Every one of these lives in `wgpu.h` — wgpu-native's own extensions — and not one of them is
- * packed, read or named by this binding. The 115 aggregates of `webgpu.h`, which is everything the
+ * packed, read or named by this binding. The 92 aggregates of `webgpu.h`, which is everything the
  * binding actually touches, are identical across v27 and v29.
  *
  * ── Why this list exists rather than a looser check ─────────────────────────────────────────────
@@ -173,7 +173,8 @@ export const GENERATIONS: Readonly<Record<number, IGeneration>> = {
  * vendored RID could see it. The finder now prefers the host's own RID and warns on a mixed tree.
  */
 export const GENERATION_VARIANT_AGGREGATES: readonly string[] = [
-  // v29 added a display-handle chain to WGPUInstanceExtras; v27 has none of these types.
+  // v29-only. The first four are the display-handle chain added to WGPUInstanceExtras;
+  // WGPUImageSubresourceRange is a separate v29 addition, unrelated to it.
   "WGPUXlibDisplayHandle",
   "WGPUXcbDisplayHandle",
   "WGPUWaylandDisplayHandle",

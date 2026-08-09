@@ -24,7 +24,7 @@ let a real compiler emit the sequence for the target it is compiling for.
 
 * **Going in** — each exported wrapper takes a **pointer** to an already-packed buffer and
   dereferences it here, so the signature facing JavaScript is the one it was already using.
-* **Coming back** — five C trampolines carry the real callback prototypes, take the by-value
+* **Coming back** — seven C trampolines carry the real callback prototypes, take the by-value
   `WGPUStringView`, and forward `(data, length)` to a flat JavaScript function pointer registered
   through `wgpu_bun_shim_set_callback`.
 

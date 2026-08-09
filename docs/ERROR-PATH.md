@@ -1,34 +1,30 @@
 # The error path
 
-The reason this package exists, stated at length. The short version is on the
-[front page](../README.md): a binding whose error scope cannot report is worse than one that
-crashes.
+Why this package exists. The short version is on the [front page](../README.md): a binding whose
+error scope cannot report is worse than one that crashes.
 
 ## Why it is the point
 
-Subtler than "the other one crashes": for both `popErrorScope` and `getCompilationInfo`, the
-dangerous failure mode is not a crash. It is a **silent green**.
+For both `popErrorScope` and `getCompilationInfo`, the dangerous failure mode is not a crash. It is
+a **silent green**.
 
 Real WebGPU test suites use the error scope *as the assertion* — push a scope, do the thing, pop,
-pass if the result is null. Nothing else is checked. So an error scope that dutifully records
-nothing, or a `getCompilationInfo()` that unconditionally returns an empty message list, does not
-fail. It makes every assertion built on top of it pass **vacuously**. A suite in that state is
-decoration: it runs, it is green, and no gate in it is capable of noticing a regression. A crash is
-loud and gets fixed in an hour; a silent green survives for months and quietly voids everything
-downstream of it.
+pass if the result is null. Nothing else is checked. So an error scope that records nothing, or a
+`getCompilationInfo()` that unconditionally returns an empty message list, does not fail: it makes
+every assertion built on it pass vacuously. A crash gets fixed; a silent green survives and voids
+everything downstream of it.
 
 So this package owes its users **negative tests** — proof that it *reports* a validation error and
-*reports* a shader compilation error, not merely that it survives being asked for one. A binding that
-cannot demonstrate a red is not entitled to be believed when it shows a green.
-
-Every error-path test in `test/` is written as a **pair**: an operation that must report, and the
-valid twin that differs only in the way that makes it valid and must report nothing. A do-nothing
+*reports* a shader compilation error, not merely that it survives being asked for one. Every
+error-path test in `test/` is written as a **pair**: an operation that must report, and the valid
+twin that differs only in the way that makes it valid and must report nothing. A do-nothing
 implementation fails the first half; an always-report implementation fails the second.
 
 ## Shader diagnostics: what is actually on offer
 
 `getCompilationInfo` is not merely missing from other bindings. **`wgpuShaderModuleGetCompilationInfo`
-is `unimplemented!()` in wgpu-native itself** — it is one of the [40 exported symbols that abort the
+is `unimplemented!()` in wgpu-native itself** (`src/unimplemented.rs`, unchanged from `v29.0.0.0`
+through current trunk) — one of the [40 exported symbols that abort the
 process](./ABI.md#the-40-symbols-that-abort-the-process). There is no native call to forward to. A
 binding that wires `GPUShaderModule.getCompilationInfo()` straight through does not return empty
 diagnostics; it kills the process.
@@ -40,9 +36,9 @@ So the honest offering is:
 > wgpu-native.
 
 That differs from Dawn, where the two channels are independent. It is not a loss of *information*:
-naga's diagnostic text is what lands in the validation error either way. It does mean the two are not
-independent oracles here, and code that only ever calls `getCompilationInfo()` without an error scope
-is relying on synthesis.
+naga's diagnostic text is what lands in the validation error either way. It does mean the two are
+not independent oracles here, and code that only ever calls `getCompilationInfo()` without an error
+scope is relying on synthesis.
 
 ```ts
 device.pushErrorScope('validation');
@@ -53,36 +49,60 @@ if (error) console.error(error.message);
 
 ## Prior art: `bun-webgpu`
 
-Worth saying plainly, because "I wrote my own" usually implies the alternative was bad, and here it
-wasn't. [`bun-webgpu`](https://github.com/kommander/bun-webgpu) (Apache-2.0, by SST) already covers
-the heavy end of the WebGPU API competently over `bun:ffi`. Verified against it on 2026-08-07, it
-correctly handled:
+[`bun-webgpu`](https://github.com/kommander/bun-webgpu) (Apache-2.0, by SST) already covers the
+heavy end of the WebGPU API competently over `bun:ffi`. Measured against it on 2026-08-07, it
+correctly handled compute dispatch with buffer readback, `r32uint` storage textures,
+`depth-2d-array` textures with comparison samplers, 3D textures with live mip chains, and the
+`shader-f16` feature with `rgba16float` render targets. That is the hard 80%. If Dawn is the backend
+you want, it is a reasonable answer.
 
-- compute dispatch with buffer readback,
-- `r32uint` storage textures,
-- `depth-2d-array` textures with comparison samplers,
-- 3D textures with live mip chains,
-- the `shader-f16` feature and `rgba16float` render targets.
+It was set aside here for two reasons: its error path is broken on Windows, and it targets Dawn —
+a choice worth making deliberately (below).
 
-That is the hard 80%, and it works. If Dawn is the backend you want, it is a reasonable answer.
+### What the error-path defect actually is
 
-It was set aside here for two specific reasons:
+Established by reading their source at `v0.1.7` (`7be02a53`).
 
-- **Its error path is broken.** `popErrorScope` crashes its userdata allocator — *even on an empty
-  scope*, i.e. on the happy path. `getCompilationInfo()` is unimplemented.
-- **It targets Dawn**, and the backend is a choice worth making deliberately (below).
+**`getCompilationInfo()` throws — it does not return an empty list.** The body is
+`return fatalError('getCompilationInfo not implemented')`, which logs to `console.error` and throws.
+A loud "not implemented" is the honest failure, not the silent-green one, so the hazard above does
+not apply to it — and on Dawn it is a *fillable* gap, because Dawn implements the underlying call
+that wgpu-native aborts on.
 
-That assessment sets this package's bar. **Its entire justification is the error path and the backend
-choice**, so those are first-class deliverables, not a later milestone.
+**Their `popErrorScope` breaks on Win64, and it is the same 16-byte aggregate this package hit from
+the opposite side.** They declare the callback's `WGPUStringView` as two register arguments —
+correct under SysV x86-64 and AArch64 AAPCS, wrong under Win64, where 16 bytes go by hidden
+reference. Every argument after it shifts by one slot, so `userdata1` receives what was packed as
+`userdata2` — zero. Their callback unpacks the correlation ticket from `userdata1` *before* testing
+for an empty message, so the empty-scope early return is unreachable and the happy path fails too.
+Their own source names the rule, in a comment beside the one callback they patched for it:
+
+> ```
+> // On windows, the WGPUStringView as value is not spread across multiple arguments, for some reason,
+> // so we need to pass the messageSize as the userdata1 pointer
+> ```
+
+Eight of their nine `JSCallback` sites take a `WGPUStringView` by value; that patch covers one of
+them. So this is [the exact aggregate and the exact
+rule](./ABI.md#not-being-wrong-a-third-time) that cost this package a CI matrix to find, with the
+partition falling the other way round: this binding was correct on Win64 and broken on the other
+three platforms; theirs is correct on those three and broken on Win64.
+
+⚠ **Argued, not executed**: the argument-shift chain above is read out of their source and the ABI
+rule, not run under a debugger, and their repository has no error-scope test and documents no crash.
+What is not in doubt is the conclusion — the fix belongs in a compiled wrapper that decodes the
+aggregate for the callee, which is what this package does and what their own `TODO` beside that
+patch proposes ("the zig wrapper should probably wrap the callback as well and pass the arguemnts
+correctly", *sic*).
 
 ## wgpu-native rather than Dawn — a deliberate backend choice
 
-Dawn and wgpu-native are both conformant-ish WebGPU implementations that disagree in observable ways:
-validation strictness, WGSL acceptance, reported limits, resource lifetimes, error message text.
-Neither is "correct"; they are different.
+Dawn and wgpu-native are both conformant-ish WebGPU implementations that disagree in observable
+ways: validation strictness, WGSL acceptance, reported limits, resource lifetimes, error message
+text. Neither is "correct"; they are different.
 
-They are also not obscure alternatives — they are **the two browser implementations**, and which one
-you validate against is the choice this package exists to hand you:
+They are also **the two browser implementations**, and which one you validate against is the choice
+this package exists to hand you:
 
 | | implementation | ships in |
 |---|---|---|
@@ -94,18 +114,12 @@ this is the binding that makes Bun agree with Deno rather than with Chrome. And 
 or wgpu-based renderer, it is the same implementation your other half already runs.
 
 The general form of the argument: a Dawn-backed binding tests an implementation you may not deploy —
-and passes.
-
-Bindings are the right layer to make that choice at. Being able to pick the implementation your JS
-code is validated against, rather than inheriting whichever one your binding's author preferred, is
-most of the value here.
+and passes. Being able to pick that implementation is most of the value here.
 
 ## Why `webgpu` itself is not an option under Bun
 
 `webgpu` (dawn-gpu/node-webgpu) ships Dawn as a prebuilt N-API addon —
-`dist/<platform>-<arch>.dawn.node`, loaded through `createRequire`. Bun's N-API compatibility does not
-stretch to it: loading the addon **segfaults the runtime** rather than throwing a catchable error.
-Verified on Bun 1.4 (canary), Windows, 2026-08-07.
-
-That is a hard wall, not a papering-over-able bug. Any WebGPU workload behind that package is simply
-unreachable from Bun.
+`dist/<platform>-<arch>.dawn.node`, loaded through `createRequire`. Bun's N-API compatibility does
+not stretch to it: loading the addon **segfaults the runtime** rather than throwing a catchable
+error. Verified on Bun 1.4 (canary), Windows, 2026-08-07 and again 2026-08-09. Any WebGPU workload
+behind that package is simply unreachable from Bun.

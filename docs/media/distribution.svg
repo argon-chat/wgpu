@@ -1,0 +1,121 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 700" width="1280" height="700" font-family="ui-sans-serif, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="How wgpu-bun's binaries travel from upstream releases to a consumer's machine">
+  <title>Distribution map: upstream release to consumer</title>
+  <desc>Two upstreams are pinned by URL and sha256, built per platform in CI, published as per-platform npm packages, and resolved at runtime in three tiers.</desc>
+
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#7d8590"/>
+    </marker>
+    <marker id="ao" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#d29922"/>
+    </marker>
+    <style>
+      .panel { fill: #0d1117; }
+      .lane  { fill: #11161d; stroke: #21262d; stroke-width: 1; rx: 10; }
+      .box   { fill: #161b22; stroke: #30363d; stroke-width: 1.25; rx: 8; }
+      .accent{ fill: #12211c; stroke: #2ea043; stroke-width: 1.5; rx: 8; }
+      .warn  { fill: #21190c; stroke: #d29922; stroke-width: 1.5; rx: 8; }
+      .h     { fill: #e6edf3; font-size: 14px; font-weight: 600; }
+      .t     { fill: #adbac7; font-size: 12px; }
+      .m     { fill: #8b949e; font-size: 11px; font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; }
+      .lbl   { fill: #7d8590; font-size: 11px; letter-spacing: .08em; font-weight: 600; }
+      .ok    { fill: #3fb950; font-size: 11.5px; font-weight: 600; }
+      .wa    { fill: #d29922; font-size: 11.5px; font-weight: 600; }
+      .edge  { stroke: #7d8590; stroke-width: 1.6; fill: none; marker-end: url(#a); }
+      .edgeo { stroke: #d29922; stroke-width: 1.6; fill: none; marker-end: url(#ao); stroke-dasharray: 5 4; }
+    </style>
+  </defs>
+
+  <rect class="panel" x="0" y="0" width="1280" height="700" rx="14"/>
+
+  <text class="lbl" x="44"  y="38">UPSTREAM</text>
+  <text class="lbl" x="356" y="38">PINNED HERE</text>
+  <text class="lbl" x="668" y="38">BUILT IN CI</text>
+  <text class="lbl" x="980" y="38">SHIPPED</text>
+
+  <rect class="lane" x="28" y="56" width="1224" height="200"/>
+
+  <rect class="box" x="44" y="76" width="268" height="88"/>
+  <text class="h" x="62" y="102">gfx-rs/wgpu-native</text>
+  <text class="t" x="62" y="125">Release archives per platform</text>
+  <text class="m" x="62" y="146">v29.0.1.1 · headers + lib</text>
+
+  <rect class="accent" x="44" y="180" width="268" height="58"/>
+  <text class="ok" x="62" y="203">POLICY · majors, then minors</text>
+  <text class="t" x="62" y="223">a major is a new generation</text>
+
+  <rect class="box" x="356" y="76" width="268" height="88"/>
+  <text class="h" x="374" y="102">wgpu-native.manifest</text>
+  <text class="t" x="374" y="125">URL + sha256, per platform</text>
+  <text class="m" x="374" y="146">mismatch = hard fail</text>
+
+  <rect class="box" x="356" y="180" width="268" height="58"/>
+  <text class="t" x="374" y="203">29 ships · 27 also runs</text>
+  <text class="m" x="374" y="223">docs/GENERATIONS.md</text>
+
+  <rect class="box" x="668" y="76" width="268" height="88"/>
+  <text class="h" x="686" y="102">fetch + build shim</text>
+  <text class="t" x="686" y="125">native runner per platform</text>
+  <text class="m" x="686" y="146">cargo cdylib</text>
+
+  <rect class="box" x="980" y="76" width="272" height="88"/>
+  <text class="h" x="998" y="102">@wgpu-bun/&lt;rid&gt;</text>
+  <text class="t" x="998" y="125">wgpu_native + ABI shim</text>
+  <text class="m" x="998" y="146">one tarball · os/cpu</text>
+
+  <rect class="box" x="668" y="180" width="584" height="58"/>
+  <text class="t" x="686" y="203">Two libraries, one package — the shim transcribes one generation</text>
+  <text class="m" x="686" y="223">separating them is impossible, not merely inadvisable</text>
+
+  <path class="edge" d="M312 120 H348"/>
+  <path class="edge" d="M624 120 H660"/>
+  <path class="edge" d="M936 120 H972"/>
+
+  <rect class="lane" x="28" y="276" width="1224" height="180"/>
+
+  <rect class="box" x="44" y="296" width="268" height="88"/>
+  <text class="h" x="62" y="322">google/dawn</text>
+  <text class="t" x="62" y="345">Release archives per platform</text>
+  <text class="m" x="62" y="366">vYYYYMMDD.HHMMSS</text>
+
+  <rect class="accent" x="44" y="400" width="268" height="40"/>
+  <text class="ok" x="62" y="425">POLICY · latest every 6 months</text>
+
+  <rect class="warn" x="356" y="296" width="268" height="88"/>
+  <text class="wa" x="374" y="322">STATIC ARCHIVES ONLY</text>
+  <text class="t" x="374" y="345">.a / .lib — nothing to dlopen</text>
+  <text class="m" x="374" y="366">the archive is an input</text>
+
+  <rect class="warn" x="668" y="296" width="268" height="88"/>
+  <text class="wa" x="686" y="322">LINK STEP</text>
+  <text class="t" x="686" y="345">static Dawn + shim, one lib</text>
+  <text class="m" x="686" y="366">MSVC no older than Dawn</text>
+
+  <rect class="box" x="980" y="296" width="272" height="88"/>
+  <text class="h" x="998" y="322">@wgpu-bun/&lt;rid&gt;-dawn</text>
+  <text class="t" x="998" y="345">opt-in, installed by hand</text>
+  <text class="m" x="998" y="366">3 platforms</text>
+
+  <path class="edgeo" d="M312 340 H348"/>
+  <path class="edgeo" d="M624 340 H660"/>
+  <path class="edgeo" d="M936 340 H972"/>
+
+  <rect class="lane" x="28" y="476" width="1224" height="196"/>
+  <text class="lbl" x="44" y="504">ON THE CONSUMER'S MACHINE</text>
+
+  <rect class="box" x="44" y="520" width="316" height="72"/>
+  <text class="h" x="62" y="546">bun add wgpu-bun</text>
+  <text class="t" x="62" y="569">os/cpu picks the platform package</text>
+
+  <rect class="box" x="44" y="608" width="316" height="48"/>
+  <text class="m" x="62" y="637">no install hook · no toolchain</text>
+
+  <rect class="box" x="408" y="520" width="844" height="136"/>
+  <text class="h" x="426" y="546">Resolution order, at first use</text>
+  <text class="t" x="426" y="574">1 · WGPU_NATIVE_LIB — an explicit path always wins</text>
+  <text class="t" x="426" y="598">2 · @wgpu-bun/&lt;rid&gt; — what the package manager installed</text>
+  <text class="t" x="426" y="622">3 · vendor/&lt;rid&gt; — a source checkout that ran bun run fetch</text>
+  <text class="m" x="426" y="646">no match: one error naming the platform, the package, the override</text>
+
+  <path class="edge" d="M360 556 H400"/>
+</svg>

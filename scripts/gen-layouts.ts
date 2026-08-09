@@ -13,9 +13,9 @@
  *
  * ── Why generate, rather than hand-write a table ────────────────────────────────────────────────
  *
- * There are 114 aggregates across the two headers. A hand-maintained table is not wrong on day one;
- * it is wrong on the day someone bumps the pin and a member is inserted in the middle of
- * `WGPULimits`. Generating means the table cannot disagree with the header it was generated from,
+ * There are 115 aggregates across the two headers (92 in `webgpu.h`, 23 in `wgpu.h`). A
+ * hand-maintained table is not wrong on day one; it is wrong on the day someone bumps the pin and a
+ * member is inserted in the middle of `WGPULimits`. Generating means the table cannot disagree with the header it was generated from,
  * and committing the output means consumers still need no toolchain.
  *
  * ── The loud-failure rule ───────────────────────────────────────────────────────────────────────

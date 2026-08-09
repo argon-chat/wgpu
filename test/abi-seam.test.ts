@@ -382,7 +382,7 @@ describe.skipIf(shim === null)("the installed shim agrees with this package abou
       expect(installed).toBe(trampolines.address(slot));
       expect(installed).toBeGreaterThan(0);
     }
-    // Five distinct trampolines, not one shared one — each has a different C prototype.
+    // Seven distinct trampolines, not one shared one — each has a different C prototype.
     const all = (Object.keys(CALLBACK_SLOTS) as (keyof typeof CALLBACK_SLOTS)[]).map(callbackAddress);
     expect(new Set(all).size).toBe(all.length);
   });

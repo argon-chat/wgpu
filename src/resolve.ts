@@ -19,7 +19,8 @@
  *                               impossible rather than merely discouraged.
  *   3. `vendor/<rid>/lib/…`   — what `scripts/fetch-wgpu-native.ts` and `scripts/shim.ts` produce.
  *
- * Tier 2 exists today even though no such sub-package is published. That is deliberate: ordering the
+ * Tier 2 is the path a consumer actually takes — the four `@wgpu-bun/<rid>` packages are published.
+ * The ordering is deliberate: ordering the
  * resolver so an npm sub-package simply *wins when present* makes publishing an additive change
  * instead of a rewrite. The cost is one `import.meta.resolve` attempt in a `try`.
  *
@@ -42,7 +43,7 @@ export const LIB_ENV_VAR = "WGPU_NATIVE_LIB";
 /** Env var holding an explicit absolute path to an ABI shim shared library. */
 export const SHIM_ENV_VAR = "WGPU_BUN_SHIM_LIB";
 
-/** npm scope the per-platform sub-packages would live under, were they published. */
+/** npm scope the per-platform sub-packages live under. */
 export const NPM_SCOPE = "@wgpu-bun";
 
 /** What a `.version`-style stamp is called for each library. */
@@ -123,7 +124,7 @@ function fromNpm(kind: ILibraryKind, rid: Rid, platform: string): IResolvedNativ
     if (!fs.existsSync(resolved)) return null;
     return describe(kind, resolved, "npm");
   } catch {
-    // Not installed. Expected on every host today — no sub-package has been published.
+    // Not installed: an unsupported platform, or a source checkout that never ran `bun run fetch`.
     return null;
   }
 }

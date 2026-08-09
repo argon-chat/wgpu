@@ -3,7 +3,7 @@
  * Re-derive the abort-on-call blocklist from upstream source at the pinned tag.
  *
  *     bun run derive:aborts            # print the derived lists
- *     bun run derive:aborts --check    # compare against the checked-in list, exit 1 on any drift
+ *     bun run derive:aborts:source --check   # compare against the checked-in list, exit 1 on drift
  *
  * ── Why this is a script and not a test ─────────────────────────────────────────────────────────
  *
