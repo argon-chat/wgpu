@@ -151,6 +151,48 @@ interface ILinkInputs {
   readonly outLib: string;
 }
 
+/**
+ * Locate `vcvars64.bat`, the only reliable way to get MSVC's linker *and* its library search path.
+ *
+ * ⚠ **`link` must never be invoked bare on Windows.** Git for Windows ships coreutils' `link.exe` in
+ * `usr/bin`, and on a GitHub runner that is what a bare `link` resolves to — it accepts the first
+ * argument and then reports `extra operand '/MACHINE:X64'`, which reads like a linker complaint and
+ * is not one. Measured on `windows-latest`. MSVC's linker is also not on `PATH` at all until the
+ * developer environment is initialised, and it needs `LIB` set for `user32.lib` and friends.
+ *
+ * So the whole invocation goes through `vcvars64.bat`, which fixes both at once, and this repository
+ * keeps that decision here rather than in the workflow — the same rule the container wrapping
+ * follows.
+ */
+function vcvarsPath(): string {
+  const vswhere = String.raw`C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe`;
+  if (!fs.existsSync(vswhere)) fail("vswhere.exe not found — is Visual Studio installed?");
+  const r = spawnSync(
+    vswhere,
+    ["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"],
+    { encoding: "utf-8" },
+  );
+  const root = (r.stdout ?? "").trim().split(/\r?\n/)[0];
+  if (!root) fail("vswhere found no Visual Studio install carrying the x64 C++ tools");
+  const bat = path.join(root, "VC", "Auxiliary", "Build", "vcvars64.bat");
+  if (!fs.existsSync(bat)) fail(`vcvars64.bat not found under ${root}`);
+  return bat;
+}
+
+/** Run a command with the MSVC developer environment initialised. */
+function runInMsvcEnv(cmd: string, args: string[], cwd: string): void {
+  const script = path.join(cwd, "_link.bat");
+  const quoted = args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
+  fs.writeFileSync(script, `@echo off\r\ncall "${vcvarsPath()}" >nul\r\n${cmd} ${quoted}\r\nexit /b %ERRORLEVEL%\r\n`);
+  try {
+    const r = spawnSync("cmd", ["/c", script], { cwd, stdio: "inherit", shell: false });
+    if (r.error) fail(`cmd: ${r.error.message}`);
+    if (r.status !== 0) fail(`${cmd} exited ${r.status}`);
+  } finally {
+    fs.rmSync(script, { force: true });
+  }
+}
+
 function linkWindows(io: ILinkInputs): void {
   const names = exportedFunctions(io.header);
   if (names.length < 200) fail(`only ${names.length} exports parsed from ${io.header} — the header shape changed`);
@@ -161,7 +203,7 @@ function linkWindows(io: ILinkInputs): void {
   // System libraries per Dawn's own installed `DawnTargets.cmake`. Notably absent: d3d12/dxgi/dxc —
   // Dawn loads those at runtime, which is also why `d3dcompiler_47.dll` has to travel beside the
   // library rather than being linked against.
-  run(
+  runInMsvcEnv(
     "link",
     [
       "/DLL", "/NOLOGO", "/MACHINE:X64",
@@ -220,9 +262,11 @@ function linkDarwin(io: ILinkInputs): void {
       "-framework", "CoreFoundation",
     ],
     io.outDir,
-    // Dawn's own macOS release is built against this floor; a link without it silently narrows the
-    // set of systems the library loads on.
-    { MACOSX_DEPLOYMENT_TARGET: "12.0" },
+    // ⚠ No `MACOSX_DEPLOYMENT_TARGET` override. An earlier revision forced `12.0`, taken from a
+    // summary of Dawn's CI rather than from the archive itself — and the objects in this release
+    // declare **26.0**. The link then emitted "built for newer 'macOS' version (26.0) than being
+    // linked (12.0)" for every object and stamped a minimum the code does not support. The objects
+    // carry their own floor; a number invented above them is worse than no number.
   );
 }
 
@@ -238,9 +282,21 @@ function verifyExports(io: ILinkInputs): number {
   const probe =
     platform === "win32"
       ? spawnSync("dumpbin", ["/EXPORTS", "/NOLOGO", io.outLib], { encoding: "utf-8" })
-      : spawnSync("nm", ["-gD", io.outLib], { encoding: "utf-8" });
+      // `-gD` is GNU syntax. BSD nm, which is what macOS has, does not take `-D` — measured: the
+      // darwin leg produced an empty probe, this function returned "tool missing", the caller
+      // downgraded it to a warning, and a library was uploaded with its exports never checked, on a
+      // green run. `-gU` is the BSD spelling for external defined symbols.
+      : spawnSync("nm", [platform === "darwin" ? "-gU" : "-gD", io.outLib], { encoding: "utf-8" });
   const text = `${probe.stdout ?? ""}`;
-  if (!text) return -1; // the tool is missing; the caller decides whether that is fatal
+  if (!text) {
+    // Fatal, not a warning. A link can succeed and export nothing — an empty version script, a
+    // `.def` parsed but ignored, a `force_load` that matched no archive — and none of that is
+    // visible until the first `dlsym` on someone else's machine.
+    fail(
+      `${io.rid}: could not read the symbol table of ${path.basename(io.outLib)}.\n` +
+        `       An unverified library must not be published, so this is an error rather than a note.`,
+    );
+  }
   const found = new Set([...text.matchAll(/\b(wgpu[A-Za-z0-9_]+)\b/g)].map((m) => m[1]!));
   return found.size;
 }
@@ -295,9 +351,7 @@ function main(argv: string[]): void {
   const size = (fs.statSync(outLib).size / 1024 / 1024).toFixed(1);
 
   const exported = verifyExports(io);
-  if (exported === -1) {
-    console.warn(`\x1b[33mwarn\x1b[0m   ${rid}: no symbol tool available — exports were NOT verified`);
-  } else if (exported < 200) {
+  if (exported < 200) {
     fail(
       `${rid}: linked, but only ${exported} wgpu* symbols are exported.\n` +
         `       A library that links and exports nothing fails at the first dlsym, far from here.`,

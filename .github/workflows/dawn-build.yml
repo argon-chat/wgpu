@@ -33,13 +33,15 @@
 name: dawn-build
 
 on:
-  workflow_dispatch:
-  pull_request:
-    paths:
+  push:
+    paths: &dawn_paths
       - "dawn.manifest.ts"
       - "scripts/dawn-fetch.ts"
       - "scripts/dawn-link.ts"
       - ".github/workflows/dawn-build.yml"
+  pull_request:
+    paths: *dawn_paths
+  workflow_dispatch:
 
 permissions:
   contents: read
