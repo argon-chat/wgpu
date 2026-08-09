@@ -179,6 +179,32 @@ function vcvarsPath(): string {
   return bat;
 }
 
+/**
+ * Run a command with the MSVC environment and capture its output.
+ *
+ * `dumpbin` needs this for the same reason `link` does: it is an MSVC tool and is not on `PATH`
+ * until `vcvars64.bat` has run. Unlike {@link runInMsvcEnv} the output is wanted, so it goes to a
+ * file the batch redirects into — `cmd /c` gives no clean way to separate the batch's own noise from
+ * the tool's on a pipe.
+ */
+function captureInMsvcEnv(cmd: string, args: string[], cwd: string): { stdout: string; stderr: string; status: number | null; error?: Error } {
+  const script = path.join(cwd, "_probe.bat");
+  const outFile = path.join(cwd, "_probe.out");
+  const quoted = args.map((a) => (a.includes(" ") ? `"${a}"` : a)).join(" ");
+  fs.writeFileSync(
+    script,
+    `@echo off\r\ncall "${vcvarsPath()}" >nul\r\n${cmd} ${quoted} > "${outFile}" 2>&1\r\nexit /b %ERRORLEVEL%\r\n`,
+  );
+  try {
+    const r = spawnSync("cmd", ["/c", script], { cwd, encoding: "utf-8" });
+    const stdout = fs.existsSync(outFile) ? fs.readFileSync(outFile, "utf-8") : "";
+    return { stdout, stderr: `${r.stderr ?? ""}`, status: r.status, ...(r.error ? { error: r.error } : {}) };
+  } finally {
+    fs.rmSync(script, { force: true });
+    fs.rmSync(outFile, { force: true });
+  }
+}
+
 /** Run a command with the MSVC developer environment initialised. */
 function runInMsvcEnv(cmd: string, args: string[], cwd: string): void {
   const script = path.join(cwd, "_link.bat");
@@ -277,28 +303,74 @@ function linkDarwin(io: ILinkInputs): void {
  * parsed but ignored, a `force_load` that silently matched no archive. That failure is invisible
  * until the first `dlsym`, so it is checked here instead.
  */
-function verifyExports(io: ILinkInputs): number {
+function verifyExports(io: ILinkInputs): { count: number; reader: string } {
   const platform = platformOf(io.rid);
-  const probe =
+
+  /**
+   * Candidate symbol readers, tried in order.
+   *
+   * A list rather than one command per platform, because the first version of this guessed and was
+   * wrong twice on one run: `nm -gD` is GNU syntax that BSD `nm` rejects, and `dumpbin` is not on
+   * `PATH` until the MSVC environment is initialised — the same trap `link` fell into. Worse, the
+   * first version discarded stderr, so the failure said only "could not read the symbol table" and
+   * named nothing. Every attempt now records what it was and what it said.
+   */
+  const attempts: { cmd: string; args: string[]; msvcEnv?: boolean }[] =
     platform === "win32"
-      ? spawnSync("dumpbin", ["/EXPORTS", "/NOLOGO", io.outLib], { encoding: "utf-8" })
-      // `-gD` is GNU syntax. BSD nm, which is what macOS has, does not take `-D` — measured: the
-      // darwin leg produced an empty probe, this function returned "tool missing", the caller
-      // downgraded it to a warning, and a library was uploaded with its exports never checked, on a
-      // green run. `-gU` is the BSD spelling for external defined symbols.
-      : spawnSync("nm", [platform === "darwin" ? "-gU" : "-gD", io.outLib], { encoding: "utf-8" });
-  const text = `${probe.stdout ?? ""}`;
-  if (!text) {
+      ? [{ cmd: "dumpbin", args: ["/EXPORTS", "/NOLOGO", io.outLib], msvcEnv: true }]
+      : platform === "darwin"
+        ? [
+            // `/usr/bin/nm` on macOS is an `xcrun` shim: if the active developer directory is not
+            // set it fails with a message on *stderr* and an empty stdout. The measured darwin leg
+            // did exactly that, and because the first version of this function read only stdout, the
+            // whole diagnosis was "could not read the symbol table". Hence both spellings, and hence
+            // stderr is now part of the report.
+            { cmd: "nm", args: ["-gU", io.outLib] },
+            { cmd: "xcrun", args: ["nm", "-gU", io.outLib] },
+            { cmd: "llvm-nm", args: ["--defined-only", "-g", io.outLib] },
+            { cmd: "objdump", args: ["-T", io.outLib] },
+          ]
+        : [
+            { cmd: "nm", args: ["-gD", io.outLib] },
+            { cmd: "objdump", args: ["-T", io.outLib] },
+            { cmd: "readelf", args: ["-Ws", io.outLib] },
+          ];
+
+  const tried: string[] = [];
+  let text: string | null = null;
+  let reader = "";
+  for (const a of attempts) {
+    const r = a.msvcEnv
+      ? captureInMsvcEnv(a.cmd, a.args, io.outDir)
+      : spawnSync(a.cmd, a.args, { encoding: "utf-8" });
+    // Success is "the reader ran", NOT "the reader printed something". An empty listing from a
+    // reader that exited 0 is a real answer — the library exports nothing — and it belongs to the
+    // symbol-count check below, which names the number. Conflating the two is how the previous
+    // version turned "your `.def`/`-exported_symbols_list` matched nothing" into the far less useful
+    // "could not read the symbol table".
+    if (!r.error && r.status === 0) {
+      text = `${r.stdout ?? ""}`;
+      reader = `${a.cmd} ${a.args.slice(0, -1).join(" ")}`;
+      break;
+    }
+    const why = r.error
+      ? r.error.message
+      : `exit ${r.status}: ${`${r.stderr ?? ""}`.trim().split("\n")[0] || "no stderr"}`;
+    tried.push(`${a.cmd} ${a.args.slice(0, -1).join(" ")} → ${why}`);
+  }
+
+  if (text === null) {
     // Fatal, not a warning. A link can succeed and export nothing — an empty version script, a
     // `.def` parsed but ignored, a `force_load` that matched no archive — and none of that is
     // visible until the first `dlsym` on someone else's machine.
     fail(
       `${io.rid}: could not read the symbol table of ${path.basename(io.outLib)}.\n` +
+        `       Tried:\n         ${tried.join("\n         ")}\n` +
         `       An unverified library must not be published, so this is an error rather than a note.`,
     );
   }
   const found = new Set([...text.matchAll(/\b(wgpu[A-Za-z0-9_]+)\b/g)].map((m) => m[1]!));
-  return found.size;
+  return { count: found.size, reader };
 }
 
 function main(argv: string[]): void {
@@ -351,13 +423,15 @@ function main(argv: string[]): void {
   const size = (fs.statSync(outLib).size / 1024 / 1024).toFixed(1);
 
   const exported = verifyExports(io);
-  if (exported < 200) {
+  if (exported.count < 200) {
     fail(
-      `${rid}: linked, but only ${exported} wgpu* symbols are exported.\n` +
-        `       A library that links and exports nothing fails at the first dlsym, far from here.`,
+      `${rid}: linked, but only ${exported.count} wgpu* symbols are exported (read with \`${exported.reader}\`).\n` +
+        `       A library that links and exports nothing fails at the first dlsym, far from here.\n` +
+        `       Zero usually means the export filter matched nothing: the generated .def, the version\n` +
+        `       script, or the -exported_symbols_list — not the link itself.`,
     );
   } else {
-    ok(`${rid}: ${exported} wgpu* symbols exported`);
+    ok(`${rid}: ${exported.count} wgpu* symbols exported (${exported.reader})`);
   }
 
   fs.writeFileSync(path.join(VENDOR_DIR, rid, ".dawn-version"), `${DAWN_TAG}\n`);

@@ -18,9 +18,14 @@
 #   linux-x64     the compiler runs inside `dockcross/manylinux_2_28-x64`, which is the image Dawn's
 #                 own CI builds in. Linking those objects on a bare runner produces a library that
 #                 needs *that runner's* glibc and silently forfeits the 2.28 floor.
-#   darwin-arm64  native, with MACOSX_DEPLOYMENT_TARGET pinned to Dawn's own 12.0.
+#                 Measured: 277 exported `wgpu*` symbols, 19.4 MiB, 65 s.
+#   darwin-arm64  native, with **no** deployment-target override — the archive's objects declare
+#                 their own minimum (26.0 in this release) and a number invented above them only
+#                 produces "built for newer macOS version" on every object. See `dawn-link.ts`.
 #   win32-x64     native, and the only leg that needs a generated `.def`: Dawn's `WGPU_EXPORT` is
 #                 empty in a static configuration, so the objects carry no `dllexport` at all.
+#                 It also needs the MSVC environment for `link` *and* `dumpbin` — both resolve to
+#                 something else, or to nothing, on a bare `PATH`.
 #
 # ⚠ The Windows link needs an MSVC toolset no older than the one Dawn was built with. Measured
 # locally: MSVC 14.50.35717 fails on `__std_min_element_4u` and two siblings — vectorised STL helpers
