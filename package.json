@@ -40,6 +40,7 @@
     "scripts/displace.ts",
     "wgpu-native.manifest.ts",
     "shim.manifest.ts",
+    "dawn.manifest.ts",
     "README.md",
     "LICENSE"
   ],

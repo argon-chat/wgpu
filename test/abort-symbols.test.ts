@@ -28,13 +28,17 @@ import {
   REQUIRED_SYMBOLS,
   SOURCE_ONLY_ABORT_SYMBOLS,
 } from "./support/abort-symbols.ts";
-import { exportsSymbol, missingLibraryMessage, nativeLibrary, nativeLibraryBytes } from "./support/native.ts";
+import { exportsSymbol, missingLibraryMessage, nativeLibraryBytes, wgpuNativeLibrary, wgpuNativeMajor } from "./support/native.ts";
 // The generation the *binary* reports, not the one a filename or a manifest claims — the whole
 // point of a per-generation partition is that it is checked against what actually loaded.
-import { existsInGeneration, nativeVersion } from "../src/index.ts";
+import { existsInGeneration } from "../src/index.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const lib = nativeLibrary();
+// Pinned to wgpu-native rather than following `WGPU_BUN_IMPL`: this suite asserts wgpu-native's own
+// export table and abort partition. Those claims do not stop being true when the process is pointed
+// at Dawn — they stop being *about the loaded library*, and a suite that quietly re-aimed would
+// report wgpu-native's manifest as wrong on the strength of Dawn's exports.
+const lib = wgpuNativeLibrary();
 
 describe("the blocklist itself", () => {
   test("is 40 symbols, 5 derivable from the binary and 35 only from upstream source", () => {
@@ -92,7 +96,7 @@ describe.skipIf(!lib)("against the installed wgpu-native", () => {
     // `FIRST_GENERATION` declares them — so this asserts the whole PARTITION rather than weakening
     // to "absences are fine". An undeclared absence still fails; so does a declared absence that
     // turns out to be present, which is how a wrong `FIRST_GENERATION` entry gets caught.
-    const major = nativeVersion().major;
+    const major = wgpuNativeMajor()!;
     const expectedAbsent = ABORT_SYMBOLS.map((s) => s.name)
       .filter((n) => !existsInGeneration(n, major))
       .sort();

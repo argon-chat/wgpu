@@ -18,7 +18,8 @@ import { dlopen } from "bun:ffi";
 import { resolveNativeLibrary } from "../resolve.ts";
 import { SUPPORTED_GENERATIONS, WGPU_NATIVE_MAJOR, WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
 import type { IResolvedNativeLibrary } from "../types.ts";
-import { SYMBOLS, assertNoBlockedSymbols } from "./symbols.ts";
+import { SYMBOLS, WGPU_NATIVE_ONLY_SYMBOLS, assertNoBlockedSymbols } from "./symbols.ts";
+import { currentImpl } from "../impl.ts";
 
 export type { Ptr } from "./pointer.ts";
 
@@ -34,8 +35,17 @@ export interface INativeVersion {
   readonly raw: number;
 }
 
+/**
+ * Bind the portable table, plus wgpu-native's own three entry points when that is what is loaded.
+ *
+ * `dlopen` binds a table atomically — one absent name rejects all of them — so the extensions cannot
+ * simply be listed and left unused under Dawn. The returned type is the union either way, so call
+ * sites keep their names; reaching for an extension under Dawn is a missing-key error at that call
+ * site, which is where the decision about what to do instead belongs.
+ */
 function openLibrary(libPath: string) {
-  return dlopen(libPath, SYMBOLS);
+  const table = currentImpl() === "dawn" ? SYMBOLS : { ...SYMBOLS, ...WGPU_NATIVE_ONLY_SYMBOLS };
+  return dlopen(libPath, table as typeof SYMBOLS & typeof WGPU_NATIVE_ONLY_SYMBOLS);
 }
 
 let loaded: {
@@ -43,6 +53,29 @@ let loaded: {
   symbols: ReturnType<typeof openLibrary>["symbols"];
   version: INativeVersion;
 } | null = null;
+
+/**
+ * Dawn's version, from the pin rather than from the binary.
+ *
+ * Dawn's tags are `vYYYYMMDD.HHMMSS` — a timestamp, not a semantic version — so the numeric fields
+ * are filled from the date and `text` carries the tag verbatim. `raw` is 0 because there is no
+ * version word to report and inventing one would make a fabricated number look measured.
+ *
+ * The stamp comes from `vendor/<rid>/.dawn-version` or the platform package; when neither is
+ * present the version is unknown, and it says that rather than guessing.
+ */
+function dawnVersion(lib: IResolvedNativeLibrary): INativeVersion {
+  const text = lib.version ?? "unknown";
+  const m = /^v?(\d{4})(\d{2})(\d{2})\.(\d+)$/.exec(text);
+  return {
+    major: m ? Number(m[1]) : 0,
+    minor: m ? Number(m[2]) : 0,
+    patch: m ? Number(m[3]) : 0,
+    build: m ? Number(m[4]) : 0,
+    raw: 0,
+    text,
+  };
+}
 
 function decodeVersion(raw: number): INativeVersion {
   const major = (raw >>> 24) & 0xff;
@@ -120,8 +153,14 @@ function load() {
     );
   }
 
-  const version = decodeVersion(Number(opened.symbols.wgpuGetVersion()));
-  assertSupportedGeneration(version, lib);
+  // wgpu-native reports its own version out of the binary, which is the only trustworthy source
+  // when a file name can say anything. Dawn exposes no runtime accessor, so the pinned tag beside
+  // the library is all there is — recorded as such, rather than fabricated into a version word.
+  const version =
+    currentImpl() === "dawn"
+      ? dawnVersion(lib)
+      : decodeVersion(Number(opened.symbols.wgpuGetVersion()));
+  if (currentImpl() !== "dawn") assertSupportedGeneration(version, lib);
 
   loaded = { lib, symbols: opened.symbols, version };
   return loaded;

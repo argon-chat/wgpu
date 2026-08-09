@@ -48,6 +48,22 @@
  * forwards naively turns a cosmetic line of test code into a process abort with a Rust backtrace
  * and no JS stack. This package therefore never forwards a label after creation; labels are only
  * ever passed *in descriptors at creation time*, where they work.
+ *
+ * ── Scope: this is wgpu-native's list, and only wgpu-native's ───────────────────────────────────
+ *
+ * Every name here was derived by executing **wgpu-native**. Dawn (`WGPU_BUN_IMPL=dawn`) is a
+ * different implementation of the same header and has not been swept, so nothing here is a claim
+ * about it — some of these very likely work there.
+ *
+ * That costs nothing, because the guard this module actually enforces is static and conservative:
+ * {@link isUnimplemented} gates the *symbol table* (`src/ffi/symbols.ts`), which is shared by both
+ * implementations, so a name that aborts under either one is simply never bound under either. The
+ * package uses `wgpuBufferGetConstMappedRange` and friends, which both implementations support.
+ *
+ * ⚠ The exported {@link isUnimplemented} / {@link assertImplemented} answer for wgpu-native even when
+ * Dawn is loaded. Sweeping Dawn is a matter of pointing `scripts/derive-unimplemented.ts` at a Dawn
+ * library — the sweep takes a library path and is implementation-agnostic — and the result would be
+ * a second list, not an edit to this one.
  */
 
 import { WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";

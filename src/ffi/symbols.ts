@@ -35,10 +35,6 @@ const { ptr, u16, u32, u64, i32, f32, void: v } = FFIType;
  * missing-key error at the call site rather than a latent one.
  */
 export const SYMBOLS = {
-  // ── version / logging ──────────────────────────────────────────────────────────────────────
-  wgpuGetVersion: { args: [], returns: u32 },
-  wgpuSetLogLevel: { args: [u32], returns: v },
-
   // ── instance ───────────────────────────────────────────────────────────────────────────────
   wgpuCreateInstance: { args: [ptr], returns: ptr },
   wgpuInstanceProcessEvents: { args: [ptr], returns: v },
@@ -59,9 +55,6 @@ export const SYMBOLS = {
   wgpuDevicePushErrorScope: { args: [ptr, u32], returns: v },
   wgpuDeviceDestroy: { args: [ptr], returns: v },
   wgpuDeviceRelease: { args: [ptr], returns: v },
-  /** `wgpu.h` extension. `wait = true` blocks until the queue drains — the tractable sync pump. */
-  wgpuDevicePoll: { args: [ptr, u32, ptr], returns: u32 },
-
   // ── resource creation ──────────────────────────────────────────────────────────────────────
   wgpuDeviceCreateBuffer: { args: [ptr, ptr], returns: ptr },
   wgpuDeviceCreateTexture: { args: [ptr, ptr], returns: ptr },
@@ -156,6 +149,34 @@ export const SYMBOLS = {
 
   // ── free-members: `WGPUSupportedFeatures` is 16 bytes, `WGPUAdapterInfo` 88 — both aggregates
   //    passed BY VALUE, so they belong to the ABI seam, not here. See ./abiSeam.ts.
+} as const satisfies Record<string, { args: readonly FFIType[]; returns: FFIType }>;
+
+/**
+ * The entry points wgpu-native has and **Dawn does not**.
+ *
+ * Measured, not assumed: every name in {@link SYMBOLS} was checked against Dawn's own `webgpu.h`
+ * (`v20260807.193620`, 277 declarations) and exactly these three are absent. They are wgpu-native's
+ * own additions rather than WebGPU — two of them are not even in `webgpu.h`, and `wgpuDevicePoll`
+ * is the `wgpu.h` extension the synchronous pump is built on.
+ *
+ * They live in a separate table because `dlopen` binds a symbol table **atomically**: one missing
+ * name fails the whole load. Binding these unconditionally is what produced the first thing that
+ * ever happened when this package was pointed at Dawn —
+ * `TypeError: Symbol "wgpuGetVersion" not found in webgpu_dawn.dll` — before a single call was made.
+ *
+ * Each has a different answer under Dawn, and none of them is "pretend it exists":
+ *
+ *   `wgpuGetVersion`   Dawn exposes no runtime version accessor at all. The version comes from the
+ *                      pinned tag instead — see `src/ffi/library.ts`.
+ *   `wgpuSetLogLevel`  wgpu-native's global logger. Dawn's logging is not part of its C API.
+ *   `wgpuDevicePoll`   Dawn's polling is `wgpuInstanceProcessEvents`, which is in `webgpu.h` and is
+ *                      already bound above and already called at every one of these call sites.
+ */
+export const WGPU_NATIVE_ONLY_SYMBOLS = {
+  wgpuGetVersion: { args: [], returns: u32 },
+  wgpuSetLogLevel: { args: [u32], returns: v },
+  /** `wgpu.h` extension. `wait = true` blocks until the queue drains — the tractable sync pump. */
+  wgpuDevicePoll: { args: [ptr, u32, ptr], returns: u32 },
 } as const satisfies Record<string, { args: readonly FFIType[]; returns: FFIType }>;
 
 /** Every symbol name this package binds directly. */

@@ -234,8 +234,9 @@ function linkWindows(io: ILinkInputs): void {
   info(`${io.rid}: ${io.exports.length} exports → ${path.basename(defPath)}`);
 
   // System libraries per Dawn's own installed `DawnTargets.cmake`. Notably absent: d3d12/dxgi/dxc —
-  // Dawn loads those at runtime, which is also why `d3dcompiler_47.dll` has to travel beside the
-  // library rather than being linked against.
+  // Dawn loads those at runtime, which is also why DXC (`dxcompiler.dll` + `dxil.dll`) has to travel
+  // beside the library rather than being linked against — see DAWN_WINDOWS_RUNTIME_FILES, where the
+  // requirement is recorded as Dawn itself reported it.
   runInMsvcEnv(
     "link",
     [
@@ -507,6 +508,18 @@ function main(argv: string[]): void {
     );
   }
   ok(`${rid}: ${api277.length} Dawn + ${SHIM_EXPORTS.length} shim symbols exported (${exported.reader})`);
+
+  // The header travels with the library, in a directory of its own.
+  //
+  // Not decoration: `test/callback-abi.test.ts` derives the population of by-value `WGPUStringView`
+  // callbacks from the header sitting beside the loaded library, and that is the check which makes
+  // "there is no third hazardous call site" a derived fact rather than a maintained list. Without a
+  // Dawn header those three checks skip, and a skipped ABI check on a *second* implementation is
+  // precisely where an unnoticed difference would live. It goes to `include-dawn` rather than
+  // `include` because wgpu-native's headers are already there and the two must never be swapped.
+  const includeDir = path.join(VENDOR_DIR, rid, "include-dawn");
+  fs.mkdirSync(includeDir, { recursive: true });
+  fs.copyFileSync(header, path.join(includeDir, "webgpu.h"));
 
   fs.writeFileSync(path.join(VENDOR_DIR, rid, ".dawn-version"), `${DAWN_TAG}\n`);
   ok(`${rid}: Dawn ${DAWN_TAG} → vendor/${rid}/lib/${path.basename(outLib)} (${size} MiB, ${seconds}s)`);

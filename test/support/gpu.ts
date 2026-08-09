@@ -277,7 +277,23 @@ export function adapter(): GPUAdapter {
  * false green is the thing being guarded against.
  */
 export async function freshDevice(label: string): Promise<GPUDevice> {
-  return await adapter().requestDevice({ label });
+  if (gate.kind !== "ready") throw new Error(`no GPU adapter: ${gate.kind}`);
+  // A **fresh adapter**, not the shared one. WebGPU says an adapter is consumed by `requestDevice`
+  // and cannot produce a second device; wgpu-native does not enforce that, so asking the cached
+  // adapter again worked here for as long as wgpu-native was the only implementation ever run.
+  // Dawn does enforce it, and says so exactly:
+  //   requestDevice failed (status 3) adapter is "consumed": it has already been used to create a
+  //   device — CreateDeviceInternal (dawn/native/Adapter.cpp:319)
+  // So this was never a Dawn quirk to work around; it was a spec rule this helper was leaning past
+  // because the lenient implementation let it.
+  const fresh = await gate.gpu.requestAdapter();
+  if (!fresh) {
+    throw new Error(
+      `requestAdapter() resolved to null while creating the "${label}" device.\n` +
+        `  The first adapter was obtained successfully, so this is not "no GPU on this host".`,
+    );
+  }
+  return await fresh.requestDevice({ label });
 }
 
 /** Minimal WGSL that must compile everywhere — the control case for compilation-error tests. */

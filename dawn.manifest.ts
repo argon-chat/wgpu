@@ -111,10 +111,28 @@ export function dawnLibFileName(platform: string = process.platform): string {
 export const DAWN_STATIC_BASENAMES = ["webgpu_dawn.lib", "libwebgpu_dawn.a"] as const;
 
 /**
- * Extra runtime files that must travel with the library.
+ * Extra runtime files Dawn's D3D12 backend loads on Windows.
  *
- * Dawn loads the DirectX shader compiler dynamically on Windows; without `d3dcompiler_47.dll`
- * beside it, D3D12 device creation fails at runtime rather than at load, which is the hard kind of
- * bug to attribute. wgpu-native has no equivalent.
+ * **Measured by execution**, and the first version of this constant was wrong. It said
+ * `d3dcompiler_47.dll` — a plausible guess, since that is what an older D3D stack needs — and the
+ * release archive turned out to contain no DLLs at all, so nothing checked it. Pointing the binding
+ * at the linked Dawn library produced the real answer, from Dawn's own error:
+ *
+ *     requestDevice failed (status 3) DynamicLib.Open: dxil.dll Windows Error: 87
+ *         at EnsureDXCLibraries (dawn/native/d3d12/PlatformFunctionsD3D12.cpp:212)
+ *
+ * Dawn compiles WGSL to DXIL through **DXC**, loaded dynamically, so `dxcompiler.dll` and
+ * `dxil.dll` must sit beside the library or D3D12 device creation fails — at `requestDevice`, not at
+ * load, which is the hard kind of failure to attribute. Both ship in the Windows SDK
+ * (`Windows Kits/10/bin/<version>/x64`) and in Microsoft's DirectXShaderCompiler releases; neither
+ * is in Google's Dawn archive.
+ *
+ * ⚠ Not yet solved for distribution: a published `@wgpu-bun/win32-x64-dawn` has to carry these or
+ * say where to get them, and that is a licensing decision rather than a technical one. Vulkan is the
+ * other way out — Dawn supports it on Windows and it needs no DXC — but this package does not
+ * currently select a graphics backend.
+ *
+ * wgpu-native has no equivalent requirement: naga emits DXIL-free bytecode paths and its D3D12
+ * backend does not link DXC.
  */
-export const DAWN_WINDOWS_RUNTIME_FILES = ["d3dcompiler_47.dll"] as const;
+export const DAWN_WINDOWS_RUNTIME_FILES = ["dxcompiler.dll", "dxil.dll"] as const;

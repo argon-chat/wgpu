@@ -18,11 +18,43 @@ import { dlopen, FFIType } from "bun:ffi";
 import * as fs from "node:fs";
 
 import { tryResolveNativeLibrary } from "../../src/resolve.ts";
+import { currentRid } from "../../wgpu-native.manifest.ts";
 import type { IResolvedNativeLibrary } from "../../src/types.ts";
 
-/** The installed library for this host, or `null` if nothing is installed. */
+/**
+ * The installed library for this host, or `null` if nothing is installed.
+ *
+ * Follows the ambient `WGPU_BUN_IMPL` — a GPU suite must test whichever implementation was selected.
+ */
 export function nativeLibrary(): IResolvedNativeLibrary | null {
   return tryResolveNativeLibrary();
+}
+
+/**
+ * The installed **wgpu-native**, whatever `WGPU_BUN_IMPL` says.
+ *
+ * For suites that assert facts about wgpu-native specifically — its export table, its abort-symbol
+ * partition, its version word. Those claims do not become false when the process is pointed at Dawn;
+ * they simply stop being about the loaded library, and a suite that quietly re-aimed at Dawn would
+ * report that wgpu-native's own manifest is wrong.
+ */
+export function wgpuNativeLibrary(): IResolvedNativeLibrary | null {
+  return tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native");
+}
+
+/**
+ * wgpu-native's generation, read out of the wgpu-native binary itself.
+ *
+ * `nativeVersion()` from the package reports whatever `WGPU_BUN_IMPL` loaded, which under Dawn is a
+ * date-shaped tag and not a generation at all. The property being asserted — "the partition matches
+ * what the binary says, not what a filename or a manifest claims" — is only preserved by opening
+ * wgpu-native on purpose, so that is what this does: one symbol, one call, no state kept.
+ */
+export function wgpuNativeMajor(): number | null {
+  const lib = wgpuNativeLibrary();
+  if (!lib) return null;
+  const { symbols } = dlopen(lib.path, { wgpuGetVersion: { args: [], returns: FFIType.u32 } });
+  return (Number(symbols.wgpuGetVersion()) >>> 24) & 0xff;
 }
 
 /** Raw bytes of the installed library. */

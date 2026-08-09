@@ -109,6 +109,7 @@ import { NPM_SCOPE, resolveNativeLibrary, shimSearchPath, tryResolveShimLibrary 
 import { sizeOf } from "../layouts/index.ts";
 import { WGPU_NATIVE_MAJOR } from "../../wgpu-native.manifest.ts";
 import { SHIM_ABI_VERSION, shimIsRequired } from "../../shim.manifest.ts";
+import { currentImpl } from "../impl.ts";
 import type { IResolvedNativeLibrary } from "../types.ts";
 import type { Ptr } from "./library.ts";
 
@@ -454,8 +455,14 @@ function bindShim(shim: IResolvedNativeLibrary, nativePath: string, s: ShimSymbo
     );
   }
 
+  // Only meaningful against wgpu-native. Dawn has no wgpu-native generation, and the shim's number
+  // says which *header shape* its `#[repr(C)]` structs match — not which library it is talking to.
+  // Comparing it to `WGPU_NATIVE_MAJOR` under Dawn would refuse a correct pairing on the strength of
+  // a number that does not apply. What still holds under both, and is checked below, is the `sizeof`
+  // agreement: that compares the shim's layouts against this package's derived ones on the real
+  // target, which is the property the check was actually protecting.
   const generation = Number(s.wgpu_bun_shim_target_generation());
-  if (generation !== WGPU_NATIVE_MAJOR) {
+  if (currentImpl() !== "dawn" && generation !== WGPU_NATIVE_MAJOR) {
     throw new AbiUnsupportedError(
       `wgpu-bun: the ABI shim at "${shim.path}" was written against wgpu-native generation ` +
         `${generation}, but this package pins generation ${WGPU_NATIVE_MAJOR}.\n` +

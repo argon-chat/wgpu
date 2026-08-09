@@ -71,6 +71,18 @@ const EXEMPT: Readonly<Record<string, string>> = {
   // so no code path can install these callbacks in the first place.
   WGPUCreateComputePipelineAsyncCallback: "wgpuDeviceCreateComputePipelineAsync aborts; blocklisted",
   WGPUCreateRenderPipelineAsyncCallback: "wgpuDeviceCreateRenderPipelineAsync aborts; blocklisted",
+
+  // Dawn only, and found the first time these checks were run against Dawn's own header rather than
+  // wgpu-native's — which is the entire reason the header is resolved per implementation. Installed
+  // exclusively by `wgpuDeviceSetLoggingCallback`, which this package does not bind and has no
+  // reason to: logging is not part of the WebGPU surface, and the two implementations expose it
+  // differently anyway (wgpu-native uses a global `wgpuSetLogCallback`, also unbound).
+  //
+  // ⚠ Binding that entry point later means giving this a trampoline slot **first**. It takes its
+  // message as a by-value `WGPUStringView`, so on three of the four platforms a naive installation
+  // reads the message out of the wrong registers — the exact failure this suite exists to prevent,
+  // and one that presents as garbled log text rather than as an error.
+  WGPULoggingCallback: "Dawn's wgpuDeviceSetLoggingCallback is not bound; needs a slot before it is",
 };
 
 /** `WGPU<Name>Callback` → the seam slot that binds it. */

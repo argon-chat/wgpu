@@ -82,6 +82,7 @@
  */
 
 import { FFIType, JSCallback } from "bun:ffi";
+import { currentImpl } from "../impl.ts";
 
 import { callbackTrampolines, seamBoundMode as boundMode, seamStatus, type CallbackSlot } from "./abiSeam.ts";
 import { decodeStringParts, readStringView } from "./strings.ts";
@@ -436,6 +437,12 @@ export function processEvents(instance: Ptr): void {
  * what makes a synchronous readback tractable; it returns immediately when the queue is empty.
  */
 export function devicePoll(device: Ptr, wait: boolean): void {
+  // Dawn has no device poll — the entry point does not exist in its C API, and its equivalent is
+  // `wgpuInstanceProcessEvents`, which every call site here already calls on the next line. So this
+  // is a no-op rather than an emulation: the delivery happens in `processEvents`, and the waiting
+  // happens in the caller's spin, which is where it happened under wgpu-native too whenever the
+  // blocking form was not available.
+  if (currentImpl() === "dawn") return;
   if (device) wgpu().wgpuDevicePoll(device, wait ? 1 : 0, null);
 }
 

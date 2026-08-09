@@ -86,6 +86,21 @@ It is a **subpath** rather than part of the root, so the three names `webgpu` ex
 `bun-webgpu` covers the heavy end of the API competently and is a reasonable answer if Dawn is what
 you want. The full assessment is in [docs/ERROR-PATH.md](docs/ERROR-PATH.md).
 
+## Dawn, if you want it
+
+The default is wgpu-native. Dawn is selectable at runtime, from the same package:
+
+```sh
+WGPU_BUN_IMPL=dawn bun run your-thing.ts
+```
+
+Both implement the same `webgpu.h` — 92 aggregates, compared field by field, zero differences — so
+nothing above the loading layer changes. The whole suite runs against either: **369 pass / 0 fail on
+both**. Google ships static archives only, so this repository links its own in public CI, with the
+ABI shim fused in, from a tag and a sha256. Opt-in: `@wgpu-bun/<platform>-dawn` is not installed by
+default, and on Windows it needs DXC beside it. Details, and what differs, in
+[docs/DAWN.md](docs/DAWN.md).
+
 ## Status
 
 **Green on every supported platform, against three graphics APIs**, on wgpu-native `v29.0.1.1`, each
@@ -166,6 +181,8 @@ console.log(resolveNativeLibrary());
   selection, how much of WebGPU real code touches, and what is out of scope.
 - [**docs/GENERATIONS.md**](docs/GENERATIONS.md) — which wgpu-native generations this binding
   accepts, what was measured on each, what adding one costs.
+- [**docs/DAWN.md**](docs/DAWN.md) — selecting Dawn, how its library is built here, and every
+  measured difference between the two implementations.
 - [**docs/PACKAGING.md**](docs/PACKAGING.md) — per-platform packages, why there is no postinstall
   hook, versioning, pinning, provenance.
 - [**docs/EVIDENCE.md**](docs/EVIDENCE.md) — what is proven by execution versus argued from a

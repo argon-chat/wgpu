@@ -21,6 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { LIB_ENV_VAR, NPM_SCOPE, resolveNativeLibrary, tryResolveNativeLibrary } from "../src/index.ts";
+import { currentRid } from "../wgpu-native.manifest.ts";
 
 const originalEnv = process.env[LIB_ENV_VAR];
 
@@ -39,7 +40,7 @@ describe("the override tier", () => {
     fs.writeFileSync(fake, "not a real library");
     try {
       process.env[LIB_ENV_VAR] = fake;
-      const resolved = tryResolveNativeLibrary();
+      const resolved = tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native");
       expect(resolved?.source).toBe("env");
       expect(resolved?.path).toBe(path.resolve(fake));
     } finally {
@@ -52,7 +53,7 @@ describe("the override tier", () => {
     // a path. Quietly using a different library than the one they named is how an afternoon
     // disappears.
     process.env[LIB_ENV_VAR] = path.join(os.tmpdir(), "definitely-not-here", "libwgpu_native.so");
-    expect(() => tryResolveNativeLibrary()).toThrow(LIB_ENV_VAR);
+    expect(() => tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native")).toThrow(LIB_ENV_VAR);
   });
 });
 
@@ -62,7 +63,7 @@ describe("when nothing is installed", () => {
     // function that conflated them would force every caller to parse an error message to tell
     // which one it had.
     process.env[LIB_ENV_VAR] = path.join(os.tmpdir(), "wgpu-bun-nonexistent-probe");
-    expect(() => tryResolveNativeLibrary()).toThrow();
+    expect(() => tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native")).toThrow();
   });
 
   test("the failure names the platform, the npm package, and the override", () => {
@@ -71,7 +72,7 @@ describe("when nothing is installed", () => {
     // Ask about a host that certainly has nothing vendored or installed for it.
     let message = "";
     try {
-      resolveNativeLibrary("freebsd-x64", "freebsd");
+      resolveNativeLibrary("freebsd-x64", "freebsd", "wgpu-native");
       throw new Error("resolveNativeLibrary should have thrown for an unsupported RID");
     } catch (err) {
       message = (err as Error).message;
@@ -85,7 +86,7 @@ describe("when nothing is installed", () => {
 
 describe("what a resolved library reports", () => {
   test("carries its origin, so a wrong-wgpu bug is one log line from an answer", () => {
-    const resolved = tryResolveNativeLibrary();
+    const resolved = tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native");
     if (!resolved) return; // covered by the "when nothing is installed" block above
 
     expect(["env", "npm", "vendor"]).toContain(resolved.source);
@@ -94,7 +95,7 @@ describe("what a resolved library reports", () => {
   });
 
   test("reports the version stamp when the install left one", () => {
-    const resolved = tryResolveNativeLibrary();
+    const resolved = tryResolveNativeLibrary(currentRid(), process.platform, "wgpu-native");
     if (!resolved || resolved.source === "env") return;
     // `null` is a legitimate answer (an install that predates stamping); a *wrong* one is not.
     if (resolved.version !== null) expect(resolved.version).toMatch(/^v\d+\./);
