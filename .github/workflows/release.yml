@@ -113,6 +113,10 @@ jobs:
           # not fetch wgpu-native — so this uploads exactly the shim.
           path: vendor
           if-no-files-found: error
+          # `.shim-version` is dot-prefixed, and upload-artifact drops hidden files by default. The
+          # stamp is what `src/resolve.ts` reads back as the installed shim version; without it the
+          # package ships and reports `null`.
+          include-hidden-files: true
 
   # ── Dawn, linked here rather than downloaded. ─────────────────────────────────────────────────
   #

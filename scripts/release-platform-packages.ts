@@ -342,10 +342,13 @@ function stage(
   // rest are copied when present, because the shim has none when it was fetched rather than built.
   for (const stamp of p.stamps) {
     const src = path.join(srcDir, stamp);
-    if (fs.existsSync(src)) fs.copyFileSync(src, path.join(outDir, stamp));
-    else if (stamp === p.stamps[0]) {
+    if (!fs.existsSync(src)) {
+      // Every stamp, not just the first. An earlier version required only `p.stamps[0]`, so a
+      // `.shim-version` lost in transit staged silently and shipped a package whose shim version
+      // reads `null` — the same dot-prefixed-file transport bug that failed the Dawn leg loudly.
       return { rid, staged: false, reason: `vendor/${rid}/${stamp} is missing — the revision would ship unrecorded` };
     }
+    fs.copyFileSync(src, path.join(outDir, stamp));
   }
 
   const incDir = path.join(srcDir, p.includeDirName);

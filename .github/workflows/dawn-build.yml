@@ -51,6 +51,11 @@ name: dawn-build
 
 on:
   push:
+    # Branches only. On a tag push `release.yml` calls this workflow, and a standalone run would land
+    # in the same concurrency group — `github.ref` is identical for both — so one cancels the other
+    # with no rule about which. The release needs its called run to survive, so the standalone one
+    # must not exist on a tag. Measured on v29.1.0: the standalone run was cancelled after 1s.
+    branches: ["**"]
     paths: &dawn_paths
       - "dawn.manifest.ts"
       - "scripts/dawn-fetch.ts"
@@ -81,7 +86,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: dawn-build-${{ github.ref }}
+  # `github.workflow` is the CALLER's name when this runs as a reusable workflow, so a run called
+  # from `release.yml` and a standalone one can never share a group even if both somehow trigger.
+  group: dawn-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -186,3 +193,9 @@ jobs:
             vendor/*/include-dawn/*
             vendor/*/.dawn-version
           if-no-files-found: error
+          # ⚠ `.dawn-version` starts with a dot, and upload-artifact treats dot-prefixed paths as
+          # hidden and drops them silently since v4.4. Measured on v29.1.0: the library and the
+          # header arrived, the stamp did not, and `release:stage --impl dawn` refused every RID
+          # with "the revision would ship unrecorded" — after the wgpu-native packages had already
+          # been staged.
+          include-hidden-files: true
