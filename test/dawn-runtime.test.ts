@@ -14,6 +14,7 @@ import * as path from "node:path";
 import { DAWN_WINDOWS_RUNTIME_FILES, DAWN_WINDOWS_VULKAN_LOADER } from "../dawn.manifest.ts";
 import { dawnWindowsDepsMessage, preloadDawnWindowsDeps, type IDawnWindowsDeps } from "../src/dawnRuntime.ts";
 import { resolveBackend } from "../src/api/gpu.ts";
+import { nativeLibrary } from "../src/ffi/library.ts";
 import { C } from "../src/enums.ts";
 
 describe("what Dawn needs on Windows", () => {
@@ -55,20 +56,58 @@ describe.skipIf(process.platform !== "win32")("the search on this host", () => {
 });
 
 describe("backend selection is untouched where it was already decided", () => {
+  // ⚠ Every call here states the implementation as well as the platform, and that is not verbosity.
+  // `resolveBackend` used to take the platform as a parameter and read the implementation from the
+  // ambient environment, so these very assertions — which name `"win32"` — entered the
+  // Dawn-on-Windows branch when the suite ran under `WGPU_BUN_IMPL=dawn`, and tried to preload
+  // `C:\Windows\System32\vulkan-1.dll` on a macOS runner. Two legs failed; the Windows leg went
+  // green, because there the DLLs exist and the test passed for a reason it was not asserting.
+
   test("wgpu-native keeps its per-platform defaults", () => {
-    expect(resolveBackend({}, "linux")).toBe(C.backendType.vulkan);
-    expect(resolveBackend({}, "darwin")).toBe(C.backendType.metal);
-    // Not `win32` here: under wgpu-native it is D3D12, but this process's implementation is chosen
-    // by the ambient env, and the Dawn branch of that decision reads the real filesystem. It is
-    // covered by the host-specific suite above and by both CI legs.
+    expect(resolveBackend({}, "linux", "wgpu-native")).toBe(C.backendType.vulkan);
+    expect(resolveBackend({}, "darwin", "wgpu-native")).toBe(C.backendType.metal);
+    expect(resolveBackend({}, "win32", "wgpu-native")).toBe(C.backendType.d3d12);
   });
 
-  test("an explicit backend is honoured verbatim, on every implementation", () => {
+  test("an explicit backend is honoured verbatim", () => {
     // Deliberate: `backend=d3d12` under Dawn without DXC still fails, rather than quietly becoming
     // Vulkan. An override that selects something else is worse than an error, because the whole
-    // reason this package states a backend is that the choice changes feature sets.
-    expect(resolveBackend({ backend: "vulkan" }, "win32")).toBe(C.backendType.vulkan);
-    expect(resolveBackend({ backend: "d3d12" }, "win32")).toBe(C.backendType.d3d12);
-    expect(resolveBackend({ backend: "auto" }, "win32")).toBe(C.backendType.undefined);
+    // reason this package states a backend is that the choice changes feature sets. That refusal is
+    // asserted on a real host below, where the dependencies are real too.
+    expect(resolveBackend({ backend: "vulkan" }, "win32", "wgpu-native")).toBe(C.backendType.vulkan);
+    expect(resolveBackend({ backend: "d3d12" }, "win32", "wgpu-native")).toBe(C.backendType.d3d12);
+    expect(resolveBackend({ backend: "auto" }, "win32", "wgpu-native")).toBe(C.backendType.undefined);
+    expect(resolveBackend({ backend: "metal" }, "darwin", "wgpu-native")).toBe(C.backendType.metal);
+  });
+
+  test("an unknown backend names the ones that exist", () => {
+    expect(() => resolveBackend({ backend: "mantle" }, "win32", "wgpu-native")).toThrow(/unknown backend/);
+    expect(() => resolveBackend({ backend: "mantle" }, "win32", "wgpu-native")).toThrow(/vulkan/);
+  });
+});
+
+describe.skipIf(process.platform !== "win32")("Dawn's backend decision, on a real Windows host", () => {
+  test("the default is one this machine can actually run", () => {
+    // Not a fixed expectation: which backend is correct here depends on what is installed, and that
+    // is the entire point of the decision. What must hold is that it picks something whose
+    // dependency was found — never D3D12 without DXC, never Vulkan without a loader.
+    const deps = preloadDawnWindowsDeps(path.dirname(nativeLibrary().path));
+    const chosen = resolveBackend({ quiet: true }, "win32", "dawn");
+    if (deps.dxc) expect(chosen).toBe(C.backendType.d3d12);
+    else if (deps.vulkan) expect(chosen).toBe(C.backendType.vulkan);
+    else throw new Error("neither dependency present; the earlier suite should have failed first");
+  });
+
+  test("an explicit backend whose dependency is absent is refused, not redirected", () => {
+    const deps = preloadDawnWindowsDeps(path.dirname(nativeLibrary().path));
+    // Only assertable for a dependency this host lacks — and on a host that has both, there is
+    // nothing to refuse, which is a pass rather than a gap.
+    if (!deps.dxc) {
+      expect(() => resolveBackend({ backend: "d3d12" }, "win32", "dawn")).toThrow(/cannot run under Dawn/);
+    }
+    if (!deps.vulkan) {
+      expect(() => resolveBackend({ backend: "vulkan" }, "win32", "dawn")).toThrow(/cannot run under Dawn/);
+    }
+    expect(deps.dxc || deps.vulkan).toBe(true);
   });
 });

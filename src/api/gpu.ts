@@ -37,7 +37,7 @@ import { seam } from "../ffi/abiSeam.ts";
 import { callbackAddress, processEvents, settle, type IHandleResult } from "../ffi/async.ts";
 import { nativeLibrary, wgpu, type Ptr } from "../ffi/library.ts";
 import * as path from "node:path";
-import { currentImpl } from "../impl.ts";
+import { currentImpl, type WgpuImpl } from "../impl.ts";
 import { dawnWindowsDepsMessage, preloadDawnWindowsDeps, type IDawnWindowsDeps } from "../dawnRuntime.ts";
 import { Arena } from "../desc/build.ts";
 import { C, POWER_PREFERENCE, toEnum } from "../enums.ts";
@@ -145,13 +145,27 @@ export function parseFlags(flags: readonly string[] | undefined): IInstanceOptio
   return options;
 }
 
-/** Resolve the backend to request, given options and the host. */
-export function resolveBackend(options: IInstanceOptions, platform = process.platform): number {
+/**
+ * Resolve the backend to request, given options and the host.
+ *
+ * ⚠ **`platform` and `impl` are one decision and must come from one place.** An earlier revision took
+ * the platform as a parameter and read the implementation from the ambient environment, so a caller
+ * that said `"win32"` on a macOS runner under `WGPU_BUN_IMPL=dawn` entered the Dawn-on-Windows
+ * branch and tried to preload `vulkan-1.dll` from `C:\Windows\System32` — on a Mac. That is what
+ * happened: two CI legs failed with a Windows dependency message listing `/Users/runner/...` paths,
+ * while the Windows leg went green, because there the DLLs really are present and the test passed
+ * for a reason unrelated to what it asserted.
+ */
+export function resolveBackend(
+  options: IInstanceOptions,
+  platform = process.platform,
+  impl: WgpuImpl = currentImpl(),
+): number {
   // Dawn on Windows loads its backend's support library dynamically, and finds it only if something
   // has already made it resident. That is true of **every** path through this function, not just the
   // default one — see `src/dawnRuntime.ts`.
   const deps =
-    platform === "win32" && currentImpl() === "dawn"
+    platform === "win32" && impl === "dawn"
       ? preloadDawnWindowsDeps(path.dirname(nativeLibrary().path))
       : null;
 
