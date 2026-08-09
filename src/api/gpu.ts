@@ -35,7 +35,10 @@
 
 import { seam } from "../ffi/abiSeam.ts";
 import { callbackAddress, processEvents, settle, type IHandleResult } from "../ffi/async.ts";
-import { wgpu, type Ptr } from "../ffi/library.ts";
+import { nativeLibrary, wgpu, type Ptr } from "../ffi/library.ts";
+import * as path from "node:path";
+import { currentImpl } from "../impl.ts";
+import { dawnWindowsDepsMessage, preloadDawnWindowsDeps, type IDawnWindowsDeps } from "../dawnRuntime.ts";
 import { Arena } from "../desc/build.ts";
 import { C, POWER_PREFERENCE, toEnum } from "../enums.ts";
 import { GPUAdapter } from "./adapter.ts";
@@ -68,6 +71,61 @@ function defaultBackendFor(platform: string): number {
 }
 
 /**
+ * Dawn on Windows: pick the backend whose runtime dependency this machine actually has.
+ *
+ * D3D12 stays the default *when it can work*, so the reference-implementation comparison the table
+ * above is about is preserved. But Dawn's D3D12 path needs DXC, which ships with the Windows SDK and
+ * therefore is not on an ordinary machine, while `vulkan-1.dll` comes with any GPU driver. Defaulting
+ * to D3D12 regardless means a plain `bun add` + `WGPU_BUN_IMPL=dawn` fails at `requestDevice()` with
+ * a Win32 error number, on a machine that could have run Vulkan the whole time.
+ *
+ * This only ever moves the *default*. An explicit `backend=d3d12` is still honoured and still fails
+ * if DXC is absent, because an override that silently selects something else is worse than an error.
+ *
+ * @see src/dawnRuntime.ts for what is preloaded and why nothing is shipped or copied.
+ */
+function dawnWindowsDefault(deps: IDawnWindowsDeps, quiet: boolean): number {
+  if (deps.dxc) return C.backendType.d3d12;
+  if (deps.vulkan) {
+    if (!quiet) {
+      console.info(
+        "wgpu-bun: Dawn on Windows — DXC (dxcompiler.dll + dxil.dll) was not found, so Vulkan is " +
+          "the default instead of D3D12.\n  Install the Windows SDK, or put the two DLLs beside the " +
+          "library, to get D3D12 back.",
+      );
+    }
+    return C.backendType.vulkan;
+  }
+  throw new Error(dawnWindowsDepsMessage(deps));
+}
+
+/**
+ * Refuse an explicitly requested backend whose dependency is not on this machine.
+ *
+ * Before this check, `WGPU_BUN_BACKEND=vulkan` under Dawn produced `requestAdapter() resolved to
+ * null` — "no GPU on this host", on a host with a GPU — because the preload had been wired into the
+ * *default* branch only and an explicit choice walked past it. The dependency is needed however the
+ * backend was chosen, so it is now resolved first and the mismatch is named here rather than
+ * surfacing as an absent adapter three layers down.
+ */
+function assertDawnWindowsBackendUsable(requested: number, deps: IDawnWindowsDeps): void {
+  const missing =
+    requested === C.backendType.d3d12 && !deps.dxc
+      ? "D3D12 needs DXC — dxcompiler.dll + dxil.dll"
+      : requested === C.backendType.vulkan && !deps.vulkan
+        ? "Vulkan needs its loader — vulkan-1.dll"
+        : null;
+  if (!missing) return;
+  throw new Error(
+    `wgpu-bun: the requested backend cannot run under Dawn on this machine — ${missing}.\n` +
+      `  The request is honoured rather than silently changed, because on this implementation the\n` +
+      `  backend changes the available feature set. Drop the override to get whichever backend does\n` +
+      `  work here.\n\n` +
+      dawnWindowsDepsMessage(deps),
+  );
+}
+
+/**
  * Turn `create()`'s string array into instance options.
  *
  * Upstream's flags are Dawn toggles; wgpu-native has no toggle system, so an unrecognised entry is
@@ -89,7 +147,21 @@ export function parseFlags(flags: readonly string[] | undefined): IInstanceOptio
 
 /** Resolve the backend to request, given options and the host. */
 export function resolveBackend(options: IInstanceOptions, platform = process.platform): number {
-  if (options.backend === undefined) return defaultBackendFor(platform);
+  // Dawn on Windows loads its backend's support library dynamically, and finds it only if something
+  // has already made it resident. That is true of **every** path through this function, not just the
+  // default one — see `src/dawnRuntime.ts`.
+  const deps =
+    platform === "win32" && currentImpl() === "dawn"
+      ? preloadDawnWindowsDeps(path.dirname(nativeLibrary().path))
+      : null;
+
+  if (options.backend === undefined) {
+    // Dawn on Windows is the one case where the host's default cannot be decided from the platform
+    // alone — it depends on which of Dawn's dependencies exists here.
+    if (deps) return dawnWindowsDefault(deps, Boolean(options.quiet));
+    return defaultBackendFor(platform);
+  }
+
   const mapped = BACKEND_ALIASES[options.backend];
   if (mapped === undefined) {
     throw new Error(
@@ -97,6 +169,7 @@ export function resolveBackend(options: IInstanceOptions, platform = process.pla
         `Known: ${Object.keys(BACKEND_ALIASES).join(", ")}.`,
     );
   }
+  if (deps) assertDawnWindowsBackendUsable(mapped, deps);
   return mapped;
 }
 

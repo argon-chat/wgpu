@@ -127,12 +127,23 @@ export const DAWN_STATIC_BASENAMES = ["webgpu_dawn.lib", "libwebgpu_dawn.a"] as 
  * (`Windows Kits/10/bin/<version>/x64`) and in Microsoft's DirectXShaderCompiler releases; neither
  * is in Google's Dawn archive.
  *
- * ⚠ Not yet solved for distribution: a published `@wgpu-bun/win32-x64-dawn` has to carry these or
- * say where to get them, and that is a licensing decision rather than a technical one. Vulkan is the
- * other way out — Dawn supports it on Windows and it needs no DXC — but this package does not
- * currently select a graphics backend.
+ * **Nothing here is redistributed.** `dxil.dll` is closed-source Microsoft code — the shader-signing
+ * library only Microsoft can produce — and shipping it would mean adopting someone else's terms and
+ * adding an unverifiable binary to a supply chain whose whole pitch is that every binary traces to a
+ * pin. `src/dawnRuntime.ts` instead preloads whatever is already on the machine, by absolute path,
+ * and falls back to Vulkan (`vulkan-1.dll`, present with any GPU driver) when DXC is not there.
  *
  * wgpu-native has no equivalent requirement: naga emits DXIL-free bytecode paths and its D3D12
  * backend does not link DXC.
+ *
+ * @see src/dawnRuntime.ts — the resolution and preload, and the measurements behind it.
  */
 export const DAWN_WINDOWS_RUNTIME_FILES = ["dxcompiler.dll", "dxil.dll"] as const;
+
+/**
+ * Dawn's Vulkan loader on Windows.
+ *
+ * The other half of the same problem, and the reason the D3D12 dependency is survivable: this one
+ * ships with every GPU driver, so an ordinary machine has it even when it has no Windows SDK.
+ */
+export const DAWN_WINDOWS_VULKAN_LOADER = "vulkan-1.dll";

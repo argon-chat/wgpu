@@ -9,8 +9,20 @@ WGPU_BUN_IMPL=dawn bun run your-thing.ts
 
 Both implement the same `webgpu.h`. That is not a hope: the 92 aggregates each header declares were
 compared field by field and differ in nothing, which is why `src/layouts`, `src/desc` and `src/api`
-are implementation-agnostic and only the loading layer knows there is a choice. The whole suite runs
-against either — **369 pass / 0 fail on both**, same tests, same machine, same GPU.
+are implementation-agnostic and only the loading layer knows there is a choice.
+
+**The whole suite runs against either — 371 pass / 0 fail — on all three platforms, in public CI, on
+three different graphics APIs.** Not a smoke test: the same corpus wgpu-native runs, in the same job
+that links the library, and a leg that cannot run it does not upload anything.
+
+| platform | adapter | API |
+|---|---|---|
+| linux-x64 | llvmpipe, Mesa 25.2.8 (LLVM 20.1.2) | Vulkan |
+| win32-x64 | Microsoft Basic Render Driver (WARP) | D3D12, with DXC from the Windows SDK |
+| darwin-arm64 | Apple Paravirtual device | Metal |
+
+Every leg reached a real device; none skipped. Locally the same suite passes against Dawn on an
+NVIDIA RTX 5070 through D3D12, which is where the differences below were found in the first place.
 
 `impl` rather than `backend` throughout, because WebGPU already uses "backend" for Vulkan / D3D12 /
 Metal, and both projects use that word that way in their own logs.
@@ -78,21 +90,85 @@ population is derived from the `webgpu.h` sitting beside the *loaded* library �
 wgpu-native, `include-dawn/` for Dawn. A single shared header directory would have checked Dawn
 against wgpu-native's declarations, which is a check that cannot fail for the wrong reason.
 
-**Windows needs DXC.** Dawn's D3D12 backend compiles WGSL to DXIL through the DirectX shader
-compiler, loaded dynamically, so `dxcompiler.dll` and `dxil.dll` must sit beside the library:
+## Windows: Dawn's dynamically-loaded dependencies
+
+Dawn loads two things at first use rather than at library load, and Google's archive contains no DLLs
+at all, so neither travels with it:
+
+| backend | needs | where it comes from |
+|---|---|---|
+| D3D12 | `dxcompiler.dll` + `dxil.dll` (DXC) | the Windows SDK, or Microsoft's DirectXShaderCompiler releases |
+| Vulkan | `vulkan-1.dll` | every GPU driver installation |
+
+Both failures land at `requestAdapter()`/`requestDevice()` as a Win32 number:
 
 ```
 requestDevice failed (status 3) DynamicLib.Open: dxil.dll Windows Error: 87
     at EnsureDXCLibraries (dawn/native/d3d12/PlatformFunctionsD3D12.cpp:212)
+Warning: Couldn't load Vulkan: DynamicLib.Open: vulkan-1.dll Windows Error: 87
 ```
 
-Both ship in the Windows SDK (`Windows Kits/10/bin/<version>/x64`) and in Microsoft's
-DirectXShaderCompiler releases. Neither is in Google's archive — which also means the earlier guess
-recorded in this repository, `d3dcompiler_47.dll`, was never checked by anything. It is now what Dawn
-itself reported.
+⚠ That **87 is `ERROR_INVALID_PARAMETER`, not "file not found"**, and it appears for `vulkan-1.dll`
+too — a DLL that is in `System32` on every machine with a driver, that this very process can `dlopen`
+by name, and that wgpu-native's Vulkan backend uses successfully in the same process moments earlier.
+Dawn resolves these through a search that does not include the standard directories.
 
-⚠ Unresolved for distribution: a published `@wgpu-bun/win32-x64-dawn` has to carry these files or say
-where to get them, and that is a licensing question rather than a technical one.
+**This package ships neither file, and copies neither.** `dxil.dll` is closed-source Microsoft code —
+the shader-signing library only Microsoft can produce — and putting it in an npm package would mean
+adopting someone else's redistribution terms and adding an unverifiable binary to a supply chain
+whose entire pitch is that every binary traces to a pin. `vulkan-1.dll` belongs to the user's driver
+install. Copying either into `node_modules` at install time was the other candidate and is worse:
+there is no postinstall hook here on purpose.
+
+Instead, [`src/dawnRuntime.ts`](../src/dawnRuntime.ts) **preloads whatever the machine already has,
+by absolute path, before the instance is created** — beside the library first, then `System32` for
+the loader and the Windows SDK for DXC. Once a module is resident, Dawn's own search finds it. Both
+paths measured on a real device: preload the system Vulkan loader → Dawn reports an NVIDIA RTX 5070
+over Vulkan; preload the SDK's DXC → the same device over D3D12. Nothing installed, nothing copied.
+
+The default backend follows from that: **D3D12 when DXC is available, Vulkan otherwise**, with one
+line saying which and why. An explicit `backend=d3d12` is still honoured and still fails without DXC —
+an override that silently selects something else is worse than an error, because on this
+implementation the backend changes the feature set. A machine with neither gets a message naming both
+options rather than a Win32 number.
+
+The earlier guess recorded in this repository, `d3dcompiler_47.dll`, was never checked by anything —
+the archive has no DLLs, so there was nothing to notice it against.
+
+## Choosing the graphics backend
+
+Independent of the implementation, and the same knob on both:
+
+```sh
+WGPU_BUN_BACKEND=vulkan  WGPU_BUN_IMPL=dawn  bun test
+create(["backend=d3d12"])            # per instance
+requestAdapter({ backendType: … })   # per request
+```
+
+This matters more here than it would elsewhere: **the same GPU exposes different features through
+different APIs** — `shader-f16` is present on Vulkan and absent on D3D12 for the reference adapter —
+so a backend is a correctness knob, not a preference. Under Dawn on Windows it is also the axis the
+runtime dependencies sit on, which is why an override is *refused* rather than redirected when its
+dependency is missing.
+
+`bun run test:matrix` runs the whole suite across every implementation × backend the host can reach
+and prints one table. On a Windows machine with a real GPU that is four cells:
+
+```
+  win32-x64
+
+  pass  wgpu-native / d3d12      376 pass, 0 fail
+  pass  wgpu-native / vulkan     376 pass, 0 fail
+  pass  dawn / d3d12             376 pass, 0 fail
+  pass  dawn / vulkan            376 pass, 0 fail
+```
+
+CI cannot produce that table: every runner has exactly one usable backend — WARP is D3D12-only,
+lavapipe is Vulkan-only, macOS is Metal. Which is precisely why the sweep is worth running by hand.
+Its first run found a defect both default paths were hiding: an explicit `WGPU_BUN_BACKEND` under
+Dawn never preloaded Dawn's dependency, because the preload had been wired into the default-backend
+branch only, and the symptom was `requestAdapter() resolved to null — no GPU on this host` on a
+machine with a GPU.
 
 ## The generation check does not apply
 

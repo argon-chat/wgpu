@@ -88,18 +88,14 @@ you want. The full assessment is in [docs/ERROR-PATH.md](docs/ERROR-PATH.md).
 
 ## Dawn, if you want it
 
-The default is wgpu-native. Dawn is selectable at runtime, from the same package:
-
-```sh
-WGPU_BUN_IMPL=dawn bun run your-thing.ts
-```
+The default is wgpu-native. Dawn is selectable at runtime, from the same package, with
+`WGPU_BUN_IMPL=dawn`.
 
 Both implement the same `webgpu.h` — 92 aggregates, compared field by field, zero differences — so
-nothing above the loading layer changes. The whole suite runs against either: **369 pass / 0 fail on
-both**. Google ships static archives only, so this repository links its own in public CI, with the
-ABI shim fused in, from a tag and a sha256. Opt-in: `@wgpu-bun/<platform>-dawn` is not installed by
-default, and on Windows it needs DXC beside it. Details, and what differs, in
-[docs/DAWN.md](docs/DAWN.md).
+nothing above the loading layer changes, and **the whole suite runs green against either, on all
+three platforms in public CI**, over Vulkan, D3D12 and Metal. Google ships static archives only, so
+this repository links its own, with the ABI shim fused in, from a tag and a sha256. Opt-in, and
+what differs: [docs/DAWN.md](docs/DAWN.md).
 
 ## Status
 
@@ -113,9 +109,8 @@ leg reaching a real device rather than skipping:
 | `linux-arm64` | llvmpipe (Mesa lavapipe) | Vulkan |
 | `darwin-arm64` | Apple Paravirtual device | Metal |
 
-Three graphics backends, two processor architectures, three calling conventions. CI legs that cannot
-reach a device are configured to **fail rather than skip**, so a green matrix means the suite ran,
-not that it was excused.
+Three graphics backends, two architectures, three calling conventions. CI legs that cannot reach a
+device **fail rather than skip**, so a green matrix means the suite ran, not that it was excused.
 
 **Implemented:** adapter, device, buffers, textures, samplers, bind groups, pipelines, encoders,
 queues; WGSL compilation, compute dispatch, render to texture, buffer readback, error scopes,
@@ -181,12 +176,12 @@ console.log(resolveNativeLibrary());
   selection, how much of WebGPU real code touches, and what is out of scope.
 - [**docs/GENERATIONS.md**](docs/GENERATIONS.md) — which wgpu-native generations this binding
   accepts, what was measured on each, what adding one costs.
-- [**docs/DAWN.md**](docs/DAWN.md) — selecting Dawn, how its library is built here, and every
-  measured difference between the two implementations.
+- [**docs/DAWN.md**](docs/DAWN.md) — selecting Dawn and a backend, how its library is built here,
+  every measured difference between the two implementations.
 - [**docs/PACKAGING.md**](docs/PACKAGING.md) — per-platform packages, why there is no postinstall
   hook, versioning, pinning, provenance.
-- [**docs/EVIDENCE.md**](docs/EVIDENCE.md) — what is proven by execution versus argued from a
-  specification, the remaining gaps, and the rules that stop a skipped GPU suite reading as a pass.
+- [**docs/EVIDENCE.md**](docs/EVIDENCE.md) — what is proven by execution versus argued from a spec,
+  the remaining gaps, and the rules that stop a skipped GPU suite reading as a pass.
 - [**docs/RELEASE.md**](docs/RELEASE.md) — how a release is cut.
 
 ## Working on the package
@@ -198,11 +193,15 @@ bun run shim:build     # build the ABI shim (needs cargo; see docs/ABI.md)
 bun run check:layouts  # confirm the generated struct layouts match those headers
 bun run typecheck
 bun test
+bun run test:matrix    # the suite × every implementation and backend this host can reach
 ```
 
-`shim:build` is optional **only on `win32-x64`**, where the direct path is correct anyway — and even
-there it is worth building, because it is the path that ships everywhere else. On the other three
-RIDs it is not optional: without it the GPU suites skip with `abi-unsupported`.
+The backend is a correctness knob — the same GPU exposes `shader-f16` over Vulkan and not over
+D3D12 — and CI cannot sweep it: every runner has exactly one usable backend. `test:matrix` does.
+
+`shim:build` is optional **only on `win32-x64`**, where the direct path is correct anyway — and worth
+building even there, since it is the path that ships everywhere else. On the other three RIDs it is
+not optional: without it the GPU suites skip with `abi-unsupported`.
 
 ## Licence
 

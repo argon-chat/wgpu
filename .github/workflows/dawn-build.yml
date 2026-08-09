@@ -149,24 +149,12 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
 
-      - name: Put DXC beside the library
-        if: matrix.rid == 'win32-x64'
-        shell: pwsh
-        # Dawn's D3D12 backend compiles WGSL to DXIL through DXC, loaded dynamically at device
-        # creation. Google's archive ships neither DLL; the Windows SDK on this image does. Measured
-        # failure without them, quoted so the next reader does not have to reproduce it:
-        #   requestDevice failed (status 3) DynamicLib.Open: dxil.dll Windows Error: 87
-        #       at EnsureDXCLibraries (dawn/native/d3d12/PlatformFunctionsD3D12.cpp:212)
-        run: |
-          $sdk = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\dxil.dll" -ErrorAction SilentlyContinue |
-                 Sort-Object FullName -Descending | Select-Object -First 1
-          if (-not $sdk) { throw "no dxil.dll under the Windows SDK on this image — Dawn's D3D12 backend cannot create a device without DXC" }
-          foreach ($dll in @("dxil.dll", "dxcompiler.dll")) {
-            $src = Join-Path $sdk.Directory $dll
-            if (-not (Test-Path $src)) { throw "$dll is missing next to $($sdk.FullName)" }
-            Copy-Item $src -Destination "vendor/${{ matrix.rid }}/lib/"
-          }
-          Write-Host "DXC from $($sdk.Directory)"
+      # ⚠ There is deliberately **no step copying DXC or the Vulkan loader** on Windows. Dawn loads
+      # both dynamically and finds neither through the standard search, but `src/dawnRuntime.ts`
+      # preloads whatever the machine already has, by absolute path, before the instance is created —
+      # so this leg exercises that resolution rather than papering over it with a copy. An earlier
+      # revision did copy DXC out of the Windows SDK here, which made the job green while leaving the
+      # runtime path that consumers take completely untested.
 
       - name: Run the suite against Dawn
         env:
