@@ -16,7 +16,7 @@
 import { dlopen } from "bun:ffi";
 
 import { resolveNativeLibrary } from "../resolve.ts";
-import { WGPU_NATIVE_MAJOR, WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
+import { SUPPORTED_GENERATIONS, WGPU_NATIVE_MAJOR, WGPU_NATIVE_TAG } from "../../wgpu-native.manifest.ts";
 import type { IResolvedNativeLibrary } from "../types.ts";
 import { SYMBOLS, assertNoBlockedSymbols } from "./symbols.ts";
 
@@ -52,6 +52,56 @@ function decodeVersion(raw: number): INativeVersion {
   return { major, minor, patch, build, raw, text: `${major}.${minor}.${patch}.${build}` };
 }
 
+/**
+ * Environment variable that downgrades an unsupported-generation refusal to a warning.
+ *
+ * It exists because "unsupported" here means *untested*, not *known broken* — a v25 library may
+ * well work. What it may also do is renumber a `wgpu.h` extension enum and silently ignore a
+ * chained struct, which is how a backend override stops taking effect without anything failing. A
+ * knob a person has to type is the right shape for that: it makes running untested combinations
+ * possible and makes doing it by accident impossible.
+ */
+export const ALLOW_UNTESTED_GENERATION_ENV = "WGPU_BUN_ALLOW_UNTESTED_GENERATION";
+
+/**
+ * The loaded library's generation must be one this package has actually been run against.
+ *
+ * Refusing rather than warning is a deliberate change of posture. A warning on stderr is invisible
+ * inside a test runner, and the failure it precedes is not a crash — between generations the
+ * observable differences are validation strictness, WGSL acceptance, and extension-struct
+ * numbering, all of which produce *plausible wrong answers* rather than errors. A suite that runs
+ * green against a library its binding was never tested with has proven nothing, and nothing about
+ * it looks wrong.
+ */
+function assertSupportedGeneration(version: INativeVersion, lib: IResolvedNativeLibrary): void {
+  if (SUPPORTED_GENERATIONS.includes(version.major)) {
+    if (version.major !== WGPU_NATIVE_MAJOR) {
+      // Supported, but not the one that ships. Said out loud once, because "which wgpu is actually
+      // running" is the single most useful line in a bug report about this package.
+      console.info(
+        `wgpu-bun: wgpu-native ${version.text} (generation ${version.major}); this package ships ` +
+          `${WGPU_NATIVE_TAG}. Both are supported.\n  Library: ${lib.path} (via ${lib.source})`,
+      );
+    }
+    return;
+  }
+
+  const message =
+    `wgpu-bun: wgpu-native ${version.text} is generation ${version.major}, which this package has ` +
+    `never been tested against.\n` +
+    `  Supported: ${SUPPORTED_GENERATIONS.join(", ")} (this build ships ${WGPU_NATIVE_TAG}).\n` +
+    `  Library: ${lib.path} (via ${lib.source})\n` +
+    `  Generations differ in validation strictness, WGSL acceptance and extension-struct numbering.\n` +
+    `  Those produce wrong answers, not errors, so this is refused rather than warned about.\n` +
+    `  Set ${ALLOW_UNTESTED_GENERATION_ENV}=1 to proceed anyway, deliberately.`;
+
+  if (process.env[ALLOW_UNTESTED_GENERATION_ENV] === "1") {
+    console.warn(`${message}\n  Proceeding: ${ALLOW_UNTESTED_GENERATION_ENV}=1.`);
+    return;
+  }
+  throw new Error(message);
+}
+
 function load() {
   if (loaded) return loaded;
 
@@ -71,13 +121,7 @@ function load() {
   }
 
   const version = decodeVersion(Number(opened.symbols.wgpuGetVersion()));
-  if (version.major !== WGPU_NATIVE_MAJOR) {
-    console.warn(
-      `wgpu-bun: loaded wgpu-native ${version.text} but this package pins ${WGPU_NATIVE_TAG} ` +
-        `(generation ${WGPU_NATIVE_MAJOR}). The C ABI, the accepted WGSL and the validation rules ` +
-        `all move between generations — expect divergence.\n  Library: ${lib.path} (via ${lib.source})`,
-    );
-  }
+  assertSupportedGeneration(version, lib);
 
   loaded = { lib, symbols: opened.symbols, version };
   return loaded;

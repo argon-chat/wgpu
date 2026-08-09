@@ -34,6 +34,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { currentRid, platformOf, type Rid } from "../wgpu-native.manifest.ts";
+import { displace } from "./displace.ts";
 import {
   SHIM_ASSETS,
   SHIM_RELEASE_TAG,
@@ -72,40 +73,6 @@ function destFor(rid: Rid): { dir: string; lib: string; stamp: string } {
   };
 }
 
-/**
- * Get a loaded shared library out of the way so a new one can take its place.
- *
- * Windows refuses to overwrite or delete a DLL that any process still has mapped, and a rebuild
- * loop reliably leaves one behind — a test runner, an editor's language server, another agent's
- * `bun` process. Killing those is not this script's business.
- *
- * It *does* permit renaming a mapped file, because the handle follows the file rather than the name.
- * So the old library is moved aside and swept up on a later run, once nothing holds it. Failing to
- * delete a leftover is not an error: it means something is still using it, which is exactly the
- * situation this is designed to survive.
- */
-function displace(libPath: string): void {
-  if (!fs.existsSync(libPath)) return;
-  // Sweep any previously displaced copies first, best-effort.
-  const dir = path.dirname(libPath);
-  const base = path.basename(libPath);
-  for (const entry of fs.readdirSync(dir)) {
-    if (entry.startsWith(`${base}.stale-`)) {
-      try {
-        fs.unlinkSync(path.join(dir, entry));
-      } catch {
-        // Still mapped by something. It will be swept next time.
-      }
-    }
-  }
-  try {
-    fs.unlinkSync(libPath);
-    return;
-  } catch {
-    // Loaded somewhere. Rename it instead — permitted even while mapped.
-  }
-  fs.renameSync(libPath, path.join(dir, `${base}.stale-${Date.now().toString(36)}`));
-}
 
 function install(rid: Rid, bytesOrPath: Uint8Array | string): void {
   const dest = destFor(rid);

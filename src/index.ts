@@ -48,7 +48,13 @@ export {
   pendingOperations,
   unmatchedDeviceCallbackCount,
 } from "./ffi/async.ts";
-export { UNIMPLEMENTED, isUnimplemented } from "./ffi/unimplemented.ts";
+export {
+  FIRST_GENERATION,
+  UNIMPLEMENTED,
+  existsInGeneration,
+  isUnimplemented,
+  type IGenerationBoundSymbol,
+} from "./ffi/unimplemented.ts";
 export {
   AbiUnsupportedError,
   BY_VALUE_CALLBACK_INFO_FUNCTIONS,
@@ -74,7 +80,15 @@ export type {
   IWebGPUGlobals,
   NativeLibrarySource,
 } from "./types.ts";
-export { WGPU_NATIVE_MAJOR, WGPU_NATIVE_TAG } from "../wgpu-native.manifest.ts";
+export {
+  DEFAULT_GENERATION,
+  GENERATIONS,
+  SUPPORTED_GENERATIONS,
+  WGPU_NATIVE_MAJOR,
+  WGPU_NATIVE_TAG,
+  generation,
+  type IGeneration,
+} from "../wgpu-native.manifest.ts";
 
 /**
  * Create the `GPU` entry point (the `navigator.gpu` equivalent).

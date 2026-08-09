@@ -29,6 +29,9 @@ import {
   SOURCE_ONLY_ABORT_SYMBOLS,
 } from "./support/abort-symbols.ts";
 import { exportsSymbol, missingLibraryMessage, nativeLibrary, nativeLibraryBytes } from "./support/native.ts";
+// The generation the *binary* reports, not the one a filename or a manifest claims — the whole
+// point of a per-generation partition is that it is checked against what actually loaded.
+import { existsInGeneration, nativeVersion } from "../src/index.ts";
 
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const lib = nativeLibrary();
@@ -78,13 +81,25 @@ describe.skipIf(!lib)("against the installed wgpu-native", () => {
     expect(derived).toEqual([...BINARY_NAMED_ABORT_SYMBOLS].sort());
   });
 
-  test("all 40 are genuinely exported, i.e. every one of them is a live trap", () => {
+  test("every trap the loaded generation has is exported, and every declared absence is absent", () => {
     // If upstream ever *implements* one it stays exported, so this test does not notice — that is
     // what `bun run derive:aborts` is for. What this catches is the opposite and more urgent case:
     // a blocklist entry that no longer exists, which means the list has gone stale and is no longer
     // describing the binary anyone is running.
-    const absent = ABORT_SYMBOLS.map((s) => s.name).filter((n) => !exportsSymbol(lib!.path, n));
-    expect(absent).toEqual([]);
+    //
+    // The list is the union across supported generations, so "no longer exists" has two meanings
+    // now, and only one of them is a defect. Four symbols were added to `webgpu.h` after v27, and
+    // `FIRST_GENERATION` declares them — so this asserts the whole PARTITION rather than weakening
+    // to "absences are fine". An undeclared absence still fails; so does a declared absence that
+    // turns out to be present, which is how a wrong `FIRST_GENERATION` entry gets caught.
+    const major = nativeVersion().major;
+    const expectedAbsent = ABORT_SYMBOLS.map((s) => s.name)
+      .filter((n) => !existsInGeneration(n, major))
+      .sort();
+    const actuallyAbsent = ABORT_SYMBOLS.map((s) => s.name)
+      .filter((n) => !exportsSymbol(lib!.path, n))
+      .sort();
+    expect(actuallyAbsent).toEqual(expectedAbsent);
   });
 });
 

@@ -92,7 +92,7 @@ jobs:
         run: cargo test
 
   test:
-    name: ${{ matrix.rid }}
+    name: ${{ matrix.rid }} · wgpu ${{ matrix.generation }}
     runs-on: ${{ matrix.runner }}
     # A GPU call that never completes is a real possibility here — wgpu-native delivers results only
     # on poll, so a driver that never answers looks exactly like slow work. The binding now imposes
@@ -105,6 +105,26 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # ── The second axis: wgpu-native GENERATION ────────────────────────────────────────────
+        #
+        # This package accepts more than one generation of the native library (see
+        # docs/GENERATIONS.md), and that claim is worth exactly as much as the evidence behind it.
+        # Running the suite on the shipped generation only would leave "27 also works" as an
+        # assertion in a README — the same category of claim this project separates out and refuses
+        # to make.
+        #
+        # The two differ in ways no offline check can see: validation strictness, WGSL acceptance,
+        # and the `wgpu.h` extension-enum numbering, which renumbered between them. None of those
+        # produce an error; they produce a different answer. So the whole suite runs twice per
+        # platform, on real devices, against both libraries.
+        generation: [29, 27]
+        # `rid` must be a real axis, not just `include` entries. An `include` object whose keys are
+        # all absent from the base matrix is merged into EVERY base combination, so listing the four
+        # platforms under `include` alone with a `generation` axis above would produce two jobs with
+        # the last platform's settings, not eight — a silent 4× loss of coverage that reads as a
+        # green matrix. With `rid` declared here, each `include` entry attaches its runner to the
+        # combinations that already have that `rid`, which is the documented behaviour.
+        rid: [linux-x64, linux-arm64, win32-x64, darwin-arm64]
         include:
           - rid: linux-x64
             runner: ubuntu-latest
@@ -153,8 +173,9 @@ jobs:
 
       - name: Fetch the pinned wgpu-native
         # Pinned by URL + sha256; a mismatch hard-fails here rather than surfacing as a strange
-        # runtime error later.
-        run: bun run fetch
+        # runtime error later. Every supported generation is pinned for every platform, which is
+        # what makes this axis a one-word change rather than a second manifest.
+        run: bun run fetch --generation ${{ matrix.generation }}
 
       - name: Build the ABI shim for this platform
         # Native, on the runner that matches the RID — no cross-compilation, no target linkers.
@@ -172,7 +193,10 @@ jobs:
 
       - name: Upload the shim artefact
         # Kept for the release workflow to consume, and for anyone bisecting a platform they cannot
-        # build for.
+        # build for. Uploaded from the SHIPPED generation's leg only: the shim is identical either
+        # way (it transcribes aggregates that did not change), but two legs uploading the same
+        # artefact name is a race, and the one that wins should not be a matter of scheduling.
+        if: matrix.generation == 29
         uses: actions/upload-artifact@v4
         with:
           name: shim-${{ matrix.rid }}
@@ -193,12 +217,23 @@ jobs:
         # second — check the compiler diagnostics before concluding an offset is wrong.
         run: bun run check:layouts
 
+      - name: The committed layouts must be right for THIS generation too
+        # `check:layouts` above compares the committed tables against the headers of whichever
+        # generation this leg fetched. That it passes on both is a measured fact, not a design
+        # guarantee: the tables carry member names and type tags only — no numbers — and the core
+        # `webgpu.h` aggregates happen to be identical across the supported generations.
+        #
+        # The day upstream changes one, THIS is the step that goes red, on the alternate-generation
+        # legs only, and the answer will be per-generation tables rather than a looser check. Saying
+        # so here means the failure arrives with its own explanation attached.
+        run: echo "layouts verified against $(cat vendor/${{ matrix.rid }}/.version)"
+
       - name: GPU preflight
         # Always exits 0. It reports the adapter and writes the marker `gpu-coverage` reads; the
         # decision about whether a missing adapter is fatal belongs to the test suite alone.
         env:
           WGPU_BUN_ALLOW_NO_ADAPTER: ${{ matrix.allow_no_adapter }}
-        run: bun run test/support/preflight.ts --marker gpu-markers/${{ matrix.rid }}.json
+        run: bun run test/support/preflight.ts --marker gpu-markers/${{ matrix.rid }}-${{ matrix.generation }}.json
 
       - name: Test
         env:
@@ -211,8 +246,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: gpu-marker-${{ matrix.rid }}
-          path: gpu-markers/${{ matrix.rid }}.json
+          name: gpu-marker-${{ matrix.rid }}-${{ matrix.generation }}
+          path: gpu-markers/${{ matrix.rid }}-${{ matrix.generation }}.json
           if-no-files-found: warn
 
   # ── The aggregate gate. Four defensible skips must not add up to a meaningless pass. ───────────

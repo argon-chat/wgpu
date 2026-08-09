@@ -50,7 +50,52 @@
  */
 
 /**
- * Sorted, exhaustive, and verified against the DLL this package pins.
+ * The generation a blocklisted symbol first **exists** in.
+ *
+ * The list below is the UNION across every supported generation, and the union is the right shape:
+ * a symbol that does not exist in the loaded library cannot be called through `dlopen` anyway, so
+ * blocklisting it there costs nothing and forgetting to blocklist it in the generation that *does*
+ * export it costs a process.
+ *
+ * These four were added to `webgpu.h` after v27. Recorded rather than dropped, because a test that
+ * asserts "every blocklisted symbol is exported" is a real check — it is what catches a name that
+ * upstream renamed, or a list transcribed from the wrong tag — and it can only stay a real check if
+ * the legitimate absences are declared instead of tolerated.
+ *
+ * @see test/abort-symbols.test.ts, which asserts exactly this partition against the loaded library.
+ *
+ * ⚠ **A list of records, not an object keyed by symbol name — and it must stay one.**
+ * `test/abort-symbols.test.ts` treats *any* exported object in `src/ffi` whose keys look like
+ * `wgpu*` as a symbol table and fails if a blocklisted name appears among them. That guard is what
+ * stops a trap from being bound by accident, and it is right to be that blunt. Tidying this into a
+ * `Record<string, number>` would trip it, and the correct response would be to change this shape
+ * back rather than to teach the guard about exceptions.
+ */
+export interface IGenerationBoundSymbol {
+  /** The blocklisted symbol. */
+  readonly symbol: string;
+  /** First wgpu-native generation whose export table contains it. */
+  readonly since: number;
+}
+
+export const FIRST_GENERATION: readonly IGenerationBoundSymbol[] = [
+  { symbol: "wgpuExternalTextureAddRef", since: 29 },
+  { symbol: "wgpuExternalTextureRelease", since: 29 },
+  { symbol: "wgpuExternalTextureSetLabel", since: 29 },
+  { symbol: "wgpuTextureGetTextureBindingViewDimension", since: 29 },
+];
+
+/** Not exported: the guard above inspects exports, and this is keyed by exactly those names. */
+const SINCE = new Map(FIRST_GENERATION.map((e) => [e.symbol, e.since]));
+
+/** Is this blocklisted symbol expected to exist in a given wgpu-native generation? */
+export function existsInGeneration(symbol: string, major: number): boolean {
+  return major >= (SINCE.get(symbol) ?? 0);
+}
+
+/**
+ * Sorted, exhaustive, and verified against the DLL this package pins — the union across supported
+ * generations, with {@link FIRST_GENERATION} recording the four that are not in all of them.
  *
  * @see scripts/derive-unimplemented.ts
  */

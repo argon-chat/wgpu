@@ -28,5 +28,7 @@
     // `@webgpu/types` is the compat contract (see src/types.ts); `bun` brings `bun:ffi` and Bun.spawn.
     "types": ["@webgpu/types", "bun"]
   },
-  "include": ["src/**/*", "scripts/**/*", "test/**/*", "wgpu-native.manifest.ts"]
+  // `examples/` is included on purpose: it is the code the front page tells people to copy, and an
+  // unchecked example is a broken example a release away.
+  "include": ["src/**/*", "scripts/**/*", "test/**/*", "examples/**/*", "wgpu-native.manifest.ts"]
 }

@@ -1,7 +1,7 @@
 {
   "name": "wgpu-bun",
   "version": "29.0.0",
-  "description": "Bun FFI binding to wgpu-native, API-compatible with the `webgpu` npm package. Pre-alpha: skeleton only.",
+  "description": "WebGPU for Bun. A bun:ffi binding to wgpu-native, API-compatible with the `webgpu` package \u2014 headless compute and offscreen rendering, no canvas required.",
   "license": "MIT",
   "author": "Yuuki Wesp <y.wesp@argon.gl>",
   "repository": {
@@ -21,6 +21,11 @@
       "bun": "./src/index.ts",
       "import": "./src/index.ts"
     },
+    "./image": {
+      "types": "./src/image.ts",
+      "bun": "./src/image.ts",
+      "import": "./src/image.ts"
+    },
     "./manifest": {
       "types": "./wgpu-native.manifest.ts",
       "bun": "./wgpu-native.manifest.ts",
@@ -29,8 +34,10 @@
   },
   "files": [
     "src",
+    "examples",
     "scripts/fetch-wgpu-native.ts",
     "scripts/shim.ts",
+    "scripts/displace.ts",
     "wgpu-native.manifest.ts",
     "shim.manifest.ts",
     "README.md",
@@ -41,10 +48,15 @@
     "wgpu",
     "wgpu-native",
     "bun",
+    "bun-ffi",
     "ffi",
     "gpu",
     "graphics",
-    "compute"
+    "compute",
+    "wgsl",
+    "headless",
+    "offscreen-rendering",
+    "typescript"
   ],
   "engines": {
     "bun": ">=1.4.0"

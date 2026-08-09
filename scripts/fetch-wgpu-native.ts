@@ -8,6 +8,7 @@
  *     bun run scripts/fetch-wgpu-native.ts --force         # re-download even if the stamp matches
  *     bun run scripts/fetch-wgpu-native.ts --soft          # tolerate NETWORK failure (never a hash one)
  *     bun run scripts/fetch-wgpu-native.ts --rid linux-x64 # install for another host
+ *     bun run scripts/fetch-wgpu-native.ts --generation 27 # install a different wgpu-native generation
  *     bun run scripts/fetch-wgpu-native.ts --update-hashes # measure sha256s, print, write nothing
  *
  * Layout it produces (all git-ignored — binaries are fetched, never committed):
@@ -30,7 +31,9 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  ASSETS,
+  DEFAULT_GENERATION,
+  SUPPORTED_GENERATIONS,
+  generation as generationOf,
   HEADER_BASENAMES,
   WGPU_NATIVE_TAG,
   assetFor,
@@ -41,6 +44,8 @@ import {
   type Rid,
 } from "../wgpu-native.manifest.ts";
 
+import { displace } from "./displace.ts";
+
 const PKG_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const VENDOR_DIR = path.join(PKG_ROOT, "vendor");
 
@@ -48,6 +53,8 @@ const VENDOR_DIR = path.join(PKG_ROOT, "vendor");
 
 interface IOptions {
   rid: Rid;
+  /** wgpu-native generation (wgpu-core major) to install. Defaults to the one this package ships. */
+  generation: number;
   force: boolean;
   soft: boolean;
   updateHashes: boolean;
@@ -56,6 +63,7 @@ interface IOptions {
 function parseArgs(argv: string[]): IOptions {
   const opts: IOptions = {
     rid: currentRid(),
+    generation: DEFAULT_GENERATION,
     force: argv.includes("--force"),
     soft: argv.includes("--soft"),
     updateHashes: argv.includes("--update-hashes"),
@@ -65,6 +73,21 @@ function parseArgs(argv: string[]): IOptions {
     const value = argv[ridIdx + 1];
     if (!value || value.startsWith("--")) fail("--rid needs a value, e.g. --rid linux-x64");
     opts.rid = value;
+  }
+  const genIdx = argv.indexOf("--generation");
+  if (genIdx !== -1) {
+    const value = argv[genIdx + 1];
+    if (!value || value.startsWith("--")) {
+      fail(`--generation needs a value, one of: ${SUPPORTED_GENERATIONS.join(", ")}`);
+    }
+    const parsed = Number(value);
+    if (!SUPPORTED_GENERATIONS.includes(parsed)) {
+      fail(
+        `--generation ${value} is not supported. Supported: ${SUPPORTED_GENERATIONS.join(", ")}.\n` +
+          `       A generation is added only once a CI leg has run the suite against it — see docs/GENERATIONS.md.`,
+      );
+    }
+    opts.generation = parsed;
   }
   return opts;
 }
@@ -102,11 +125,12 @@ function sha256(bytes: Uint8Array): string {
  * `--update-hashes`: download every pinned archive and print manifest-ready lines. Writes nothing —
  * a human pastes the result, so the act of pinning stays a deliberate, reviewable edit.
  */
-async function updateHashes(): Promise<void> {
-  console.log(`\nMeasuring sha256 for ${WGPU_NATIVE_TAG} — paste these into wgpu-native.manifest.ts:\n`);
+async function updateHashes(major: number): Promise<void> {
+  const gen = generationOf(major);
+  console.log(`\nMeasuring sha256 for ${gen.tag} — paste these into wgpu-native.manifest.ts:\n`);
   let failures = 0;
-  for (const rid of supportedRids()) {
-    const asset = ASSETS[rid];
+  for (const rid of supportedRids(major)) {
+    const asset = gen.assets[rid];
     if (!asset) continue;
     try {
       const bytes = await download(asset.url);
@@ -181,11 +205,12 @@ function findByBasename(root: string, basename: string): string | null {
 // ── install ─────────────────────────────────────────────────────────────────────────────────────
 
 async function install(opts: IOptions): Promise<void> {
-  const asset = assetFor(opts.rid);
+  const tag = generationOf(opts.generation).tag;
+  const asset = assetFor(opts.rid, opts.generation);
   if (!asset) {
     fail(
-      `no pinned wgpu-native archive for RID "${opts.rid}".\n` +
-        `       supported: ${supportedRids().join(", ")}\n` +
+      `no pinned wgpu-native ${tag} archive for RID "${opts.rid}".\n` +
+        `       supported: ${supportedRids(opts.generation).join(", ")}\n` +
         `       Add an entry to wgpu-native.manifest.ts if upstream publishes one.`,
     );
   }
@@ -195,8 +220,10 @@ async function install(opts: IOptions): Promise<void> {
   const libPath = path.join(outDir, "lib", libFileName(platformOf(opts.rid)));
 
   if (!opts.force && fs.existsSync(stampPath) && fs.existsSync(libPath)) {
-    if (fs.readFileSync(stampPath, "utf-8").trim() === WGPU_NATIVE_TAG) {
-      ok(`${opts.rid}: wgpu-native ${WGPU_NATIVE_TAG} already vendored`);
+    // The stamp carries the TAG, so switching generations in place is detected as staleness and
+    // re-installs — `--generation 27` after a v29 fetch must not report "already vendored".
+    if (fs.readFileSync(stampPath, "utf-8").trim() === tag) {
+      ok(`${opts.rid}: wgpu-native ${tag} already vendored`);
       return;
     }
   }
@@ -253,10 +280,28 @@ async function install(opts: IOptions): Promise<void> {
     );
   }
 
-  fs.rmSync(outDir, { recursive: true, force: true });
+  // Replace only what this script owns — the wgpu-native library and the headers — rather than
+  // wiping `vendor/<rid>/`.
+  //
+  // Two reasons, and the second one is a Windows fact rather than a preference:
+  //
+  //   · **The ABI shim lives in the same `lib/` directory**, deliberately: the platform npm package
+  //     ships the two libraries in one tarball because a shim transcribes one generation's struct
+  //     layouts and is only correct paired with it. Wiping the directory deletes it, so every
+  //     `bun run fetch` silently un-installed the shim and the next test run took the direct path
+  //     (or refused outright, off Win64) for reasons nothing reported.
+  //   · **A locked DLL makes `rm -rf` fail PART WAY THROUGH.** Windows refuses to unlink a mapped
+  //     image, so a recursive delete that has already removed `include/` throws EPERM and leaves a
+  //     half-installed tree behind — worse than either succeeding or not starting.
+  const includeDir = path.join(outDir, "include");
+  fs.rmSync(includeDir, { recursive: true, force: true });
   fs.mkdirSync(path.join(outDir, "lib"), { recursive: true });
-  fs.mkdirSync(path.join(outDir, "include"), { recursive: true });
-  fs.copyFileSync(foundLib, path.join(outDir, "lib", wantedLib));
+  fs.mkdirSync(includeDir, { recursive: true });
+  // The library may be mapped right now — by the editor, by a test run, by anything that called
+  // create(). Displacing it is what makes a re-fetch safe while something has it open.
+  const destLib = path.join(outDir, "lib", wantedLib);
+  displace(destLib);
+  fs.copyFileSync(foundLib, destLib);
 
   for (const header of HEADER_BASENAMES) {
     const found = findByBasename(extracted, header);
@@ -264,18 +309,18 @@ async function install(opts: IOptions): Promise<void> {
     else warn(`${opts.rid}: header ${header} not present in the archive`);
   }
 
-  fs.writeFileSync(stampPath, `${WGPU_NATIVE_TAG}\n`);
+  fs.writeFileSync(stampPath, `${tag}\n`);
   fs.rmSync(staging, { recursive: true, force: true });
 
   const mib = (fs.statSync(path.join(outDir, "lib", wantedLib)).size / 1024 / 1024).toFixed(1);
-  ok(`${opts.rid}: wgpu-native ${WGPU_NATIVE_TAG} → vendor/${opts.rid}/lib/${wantedLib} (${mib} MiB)`);
+  ok(`${opts.rid}: wgpu-native ${tag} → vendor/${opts.rid}/lib/${wantedLib} (${mib} MiB)`);
 }
 
 // ── entry ───────────────────────────────────────────────────────────────────────────────────────
 
 const opts = parseArgs(process.argv.slice(2));
 try {
-  if (opts.updateHashes) await updateHashes();
+  if (opts.updateHashes) await updateHashes(opts.generation);
   else await install(opts);
 } catch (err) {
   fail((err as Error).message);
