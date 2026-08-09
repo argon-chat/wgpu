@@ -94,8 +94,15 @@ And by design:
 - **Browser API fidelity beyond WebGPU.** No `requestAnimationFrame`, no `ImageBitmap`, no
   `OffscreenCanvas`. Note that `queue.copyExternalImageToTexture` therefore has no equivalent — decode
   to a `Uint8Array` and use `writeTexture`.
-- **Dawn.** Not a fallback, not a build flag. If you want Dawn under Bun, `bun-webgpu` already does it.
-- **Node.** Bun-only, deliberately — `bun:ffi` *is* the implementation strategy.
+- **Dawn.** Not a fallback and not a build flag *in this package*. If you want Dawn under Bun,
+  `bun-webgpu` already does it.
+- **Node.** Bun-only, deliberately — `bun:ffi` *is* the implementation strategy here.
+
+  Both of those are properties of **this package**, not of the repository. `wgpu-bun` is the Bun
+  binding; a Node counterpart, or a Dawn-backed one, would be its own package built on its own
+  mechanism, and neither would change what the sentences above say about this one. That is also why
+  the repository is `argon-chat/wgpu` and not `argon-chat/wgpu-bun` — see
+  [RELEASE.md](./RELEASE.md#repository-name-deliberately-not-the-package-name).
 - **WebGPU CTS conformance.** A worthy goal; not a claim that will be made before it is measured.
 
 Nothing on this list returns a plausible-looking nothing. A call either does the thing or throws

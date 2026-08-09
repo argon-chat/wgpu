@@ -95,19 +95,18 @@ Worth knowing before submitting: the existing entries do not consistently follow
 actually reads. The maintainers ask for edits on the existing PR rather than a new one, so expect a
 round of review rather than a merge or a close.
 
-## Repository name and discoverability
+## Repository name: deliberately NOT the package name
 
-The npm package is `wgpu-bun`; the repository is `argon-chat/wgpu`. A search for "bun webgpu" on
-GitHub does not find the latter, which is the whole audience.
+The npm package is `wgpu-bun`; the repository is `argon-chat/wgpu`, and it stays that way.
 
-Renaming to `wgpu-bun` costs a redirect GitHub maintains for you, and requires updating in the same
-change:
+The obvious argument for renaming is discoverability — a GitHub search for "bun webgpu" does not
+find `argon-chat/wgpu`. Topics answer that (below), and the owner's roadmap answers the rest:
+**Dawn and a Node port are both on the table.** A repository named `wgpu-bun` would then be hosting
+a binding that is neither only-wgpu nor only-bun, and renaming a second time costs the same as the
+first. The package name is one artefact this repository produces, not its identity.
 
-- `repository.url`, `homepage` and `bugs.url` in `package.json` — an npm trusted-publisher
-  configuration matches on the repository, so it must be updated on npmjs.com too, for all five
-  packages;
-- the three badge URLs at the top of `README.md`;
-- the `SHIM_ASSETS` release URLs in `shim.manifest.ts`.
+So if a future reader wonders why the two names differ: they differ on purpose, and the general one
+is the repository.
 
 Topics, which cost nothing and are how GitHub search actually finds things:
 

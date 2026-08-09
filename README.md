@@ -6,9 +6,10 @@
 [![bun](https://img.shields.io/badge/bun-%E2%89%A5%201.4-f9f1e1?logo=bun)](https://bun.sh)
 
 **The `webgpu` npm package segfaults Bun. This is a WebGPU that runs there.** A `bun:ffi` binding to
-[wgpu-native](https://github.com/gfx-rs/wgpu-native), API-compatible with
-[`webgpu`](https://www.npmjs.com/package/webgpu) — headless compute and offscreen rendering on
-Windows, macOS and Linux, x64 and arm64.
+[wgpu-native](https://github.com/gfx-rs/wgpu-native) — the C API over
+[`wgpu`](https://github.com/gfx-rs/wgpu), which is the core of WebGPU in **Firefox, Servo and
+Deno** — API-compatible with [`webgpu`](https://www.npmjs.com/package/webgpu). Headless compute and
+offscreen rendering on Windows, macOS and Linux, x64 and arm64.
 
 ```sh
 bun add wgpu-bun
@@ -79,7 +80,7 @@ It is a **subpath** on purpose: the root export stays exactly the three names `w
 
 | | **wgpu-bun** | [`bun-webgpu`](https://github.com/kommander/bun-webgpu) | [`webgpu`](https://www.npmjs.com/package/webgpu) |
 |---|---|---|---|
-| Backend | **wgpu-native** (the Rust `wgpu` everyone else ships) | Dawn | Dawn |
+| Backend | **wgpu-native** — the Rust `wgpu` behind Firefox, Servo and Deno | Dawn — Chromium's | Dawn — Chromium's |
 | Runs under Bun | **yes** | yes | **no** — the N-API addon segfaults the runtime |
 | `popErrorScope()` | **reports, with negative tests proving it can go red** | crashes its allocator, even on an empty scope | works |
 | `getCompilationInfo()` | **real diagnostics**, synthesised from the validation error | unimplemented | works |

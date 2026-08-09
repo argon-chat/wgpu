@@ -79,10 +79,22 @@ choice**, so those are first-class deliverables, not a later milestone.
 
 Dawn and wgpu-native are both conformant-ish WebGPU implementations that disagree in observable ways:
 validation strictness, WGSL acceptance, reported limits, resource lifetimes, error message text.
-Neither is "correct"; they are different. wgpu-native is the C API over
-[wgpu](https://github.com/gfx-rs/wgpu), the same implementation every Rust/wgpu consumer ships. If
-that is your deployment target, a Dawn-backed binding tests an implementation you do not run — and
-passes.
+Neither is "correct"; they are different.
+
+They are also not obscure alternatives — they are **the two browser implementations**, and which one
+you validate against is the choice this package exists to hand you:
+
+| | implementation | ships in |
+|---|---|---|
+| **wgpu-native** — what this binds | the C API over [`wgpu`](https://github.com/gfx-rs/wgpu) | "the core of the WebGPU integration in **Firefox, Servo, and Deno**" — wgpu's own README |
+| **Dawn** — what `webgpu` and `bun-webgpu` bind | Google's implementation | "the underlying implementation of WebGPU in **Chromium**" — Dawn's own README |
+
+Deno is the one to notice if you are choosing a JavaScript runtime's binding: its WebGPU is wgpu, so
+this is the binding that makes Bun agree with Deno rather than with Chrome. And if you ship a Rust
+or wgpu-based renderer, it is the same implementation your other half already runs.
+
+The general form of the argument: a Dawn-backed binding tests an implementation you may not deploy —
+and passes.
 
 Bindings are the right layer to make that choice at. Being able to pick the implementation your JS
 code is validated against, rather than inheriting whichever one your binding's author preferred, is
